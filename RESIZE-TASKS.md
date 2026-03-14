@@ -115,12 +115,13 @@ The core bug is architectural: per-pane resize PDUs are fire-and-forget async ta
 - [ ] Run `track-pane-sizes.py` against a session running WITH the fix
 - **Test count:** 9 total (4 fix-proof, 2 bug-proof, 2 baseline, 1 original)
 
-### Phase 2: Hardening
+### Phase 2: Hardening (in progress)
 
-- [ ] Add `reconcile_tree_sizes` to `TabInner::resize()` as well (not just rebuild)
-- [ ] Add `#[cfg(debug_assertions)]` invariant check after every tree mutation
-- [ ] Investigate batched resize PDU (single `ResizeTab` PDU with all pane sizes)
-- [ ] Investigate generation counter on `Pdu::Resize` to discard stale PDUs
+- [x] Add `reconcile_tree_sizes` to `TabInner::resize()` — defends against drift in window-resize path
+- [x] Add `debug_assert_tree_invariants()` after `resize()` and `rebuild_splits` — catches violations in debug builds
+- [ ] Batched resize PDU — deferred for upstream PR (protocol change, needs `ResizeTab` codec type + version bump)
+- [ ] Generation counter on `Pdu::Resize` — deferred (similar scope)
+- Root cause: `ClientPane::resize()` spawns independent `promise::spawn::spawn(...).detach()` per pane
 - Pass criterion: `stress-resize.sh --rounds 1000` produces zero violations
 
 ### Phase 3: Upstream
