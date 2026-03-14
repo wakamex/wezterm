@@ -3841,6 +3841,11 @@ mod test {
         check("after resize back", &tab);
     }
 
+    // Note: zoom/unzoom with interleaving cannot be tested as a pure unit
+    // test because toggle_zoom() requires the Mux singleton. The zoom path
+    // is protected by resize() having reconcile_tree_sizes, which is called
+    // when unzoom triggers resize().
+
     fn is_send_and_sync<T: Send + Sync>() -> bool {
         true
     }
