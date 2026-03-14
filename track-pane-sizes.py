@@ -109,15 +109,22 @@ def check_tab_invariants(rects):
     for left_col, group in col_groups.items():
         group.sort(key=lambda r: r.top_row)
 
-        # Check width consistency within column
-        widths = set(r.cols for r in group)
-        if len(widths) > 1:
-            violations.append({
-                "type": "column_width_inconsistency",
-                "column_left": left_col,
-                "pane_ids": [r.pane_id for r in group],
-                "widths": {r.pane_id: r.cols for r in group},
-            })
+        # Check width consistency only among vertically adjacent panes
+        # (panes that form a contiguous column with dividers between them).
+        # Panes at the same left_col but non-adjacent are at different
+        # nesting levels and may legitimately have different widths.
+        for i in range(1, len(group)):
+            if group[i].top_row == group[i - 1].bottom_row + 1:
+                if group[i].cols != group[i - 1].cols:
+                    violations.append({
+                        "type": "column_width_inconsistency",
+                        "column_left": left_col,
+                        "pane_ids": [group[i - 1].pane_id, group[i].pane_id],
+                        "widths": {
+                            group[i - 1].pane_id: group[i - 1].cols,
+                            group[i].pane_id: group[i].cols,
+                        },
+                    })
 
         # Total height = sum of rows + (n-1) dividers between them
         total_rows = sum(r.rows for r in group) + (len(group) - 1)
