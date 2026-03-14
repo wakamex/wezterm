@@ -3723,6 +3723,63 @@ mod test {
         );
     }
 
+    /// Verify that removing panes from various layouts preserves tree
+    /// invariants. Tests the `remove_pane_if` → `apply_pane_size` cascade.
+    #[test]
+    fn pane_removal_preserves_invariants() {
+        let size = TerminalSize {
+            rows: 80,
+            cols: 160,
+            pixel_width: 1600,
+            pixel_height: 2000,
+            dpi: 96,
+        };
+
+        let check = |label: &str, tab: &Tab| {
+            let inner = tab.inner.lock();
+            if inner.pane.as_ref().map_or(true, |t| t.num_leaves() < 2) {
+                return; // single pane or empty — no split to check
+            }
+            let errors = check_tree_invariants(inner.pane.as_ref().unwrap(), &inner.size);
+            assert!(errors.is_empty(), "{}: {:?}", label, errors);
+        };
+
+        // L-shaped: remove bottom-right pane (pane2), should leave 2-pane horizontal
+        let (tab, _pane0, _pane1, pane2) = make_l_shaped_tab(size);
+        tab.resize_split_by(1, 10);
+        check("L-shape before removal", &tab);
+        tab.remove_pane(pane2.pane_id());
+        check("L-shape after removing bottom-right", &tab);
+
+        // L-shaped: remove top-right pane (pane1), should leave 2-pane horizontal
+        let (tab, _pane0, pane1, _pane2) = make_l_shaped_tab(size);
+        tab.resize_split_by(1, 10);
+        tab.remove_pane(pane1.pane_id());
+        check("L-shape after removing top-right", &tab);
+
+        // L-shaped: remove left pane (pane0), should leave 2-pane vertical
+        let (tab, pane0, _pane1, _pane2) = make_l_shaped_tab(size);
+        tab.resize_split_by(1, 10);
+        tab.remove_pane(pane0.pane_id());
+        check("L-shape after removing left", &tab);
+
+        // Grid: remove one corner, leaving a T-shape
+        let (tab, _pane0, _pane1, _pane2, pane3) = make_grid_tab(size);
+        tab.resize_split_by(1, 7);
+        tab.resize_split_by(2, -5);
+        check("Grid before removal", &tab);
+        tab.remove_pane(pane3.pane_id());
+        check("Grid after removing bottom-right", &tab);
+
+        // T-shaped: remove bottom pane, leaving 2-pane horizontal
+        let (tab, _pane0, _pane1, pane2) = make_t_shaped_tab(size);
+        tab.resize_split_by(0, 5);
+        tab.resize_split_by(1, 8);
+        check("T-shape before removal", &tab);
+        tab.remove_pane(pane2.pane_id());
+        check("T-shape after removing bottom", &tab);
+    }
+
     fn is_send_and_sync<T: Send + Sync>() -> bool {
         true
     }
