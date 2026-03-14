@@ -576,6 +576,79 @@ fn reconcile_tree_sizes(tree: &mut Tree, allocated: &TerminalSize) {
     }
 }
 
+/// Debug-only assertion that the split tree satisfies all parent-child
+/// size constraints. Called after every tree mutation in debug builds
+/// to catch invariant violations at the source.
+#[cfg(debug_assertions)]
+fn debug_assert_tree_invariants(tree: &Tree, size: &TerminalSize) {
+    fn check(tree: &Tree, allocated: &TerminalSize, errors: &mut Vec<String>) {
+        match tree {
+            Tree::Empty | Tree::Leaf(_) => {}
+            Tree::Node { data: None, .. } => {}
+            Tree::Node {
+                left,
+                right,
+                data: Some(data),
+            } => {
+                match data.direction {
+                    SplitDirection::Horizontal => {
+                        if data.first.rows != allocated.rows {
+                            errors.push(format!(
+                                "H first.rows={} != allocated.rows={}",
+                                data.first.rows, allocated.rows
+                            ));
+                        }
+                        if data.second.rows != allocated.rows {
+                            errors.push(format!(
+                                "H second.rows={} != allocated.rows={}",
+                                data.second.rows, allocated.rows
+                            ));
+                        }
+                        let total = data.first.cols + 1 + data.second.cols;
+                        if total != allocated.cols {
+                            errors.push(format!(
+                                "H cols: {}+1+{}={} != {}",
+                                data.first.cols, data.second.cols, total, allocated.cols
+                            ));
+                        }
+                    }
+                    SplitDirection::Vertical => {
+                        if data.first.cols != allocated.cols {
+                            errors.push(format!(
+                                "V first.cols={} != allocated.cols={}",
+                                data.first.cols, allocated.cols
+                            ));
+                        }
+                        if data.second.cols != allocated.cols {
+                            errors.push(format!(
+                                "V second.cols={} != allocated.cols={}",
+                                data.second.cols, allocated.cols
+                            ));
+                        }
+                        let total = data.first.rows + 1 + data.second.rows;
+                        if total != allocated.rows {
+                            errors.push(format!(
+                                "V rows: {}+1+{}={} != {}",
+                                data.first.rows, data.second.rows, total, allocated.rows
+                            ));
+                        }
+                    }
+                }
+                check(left, &data.first, errors);
+                check(right, &data.second, errors);
+            }
+        }
+    }
+
+    let mut errors = Vec::new();
+    check(tree, size, &mut errors);
+    assert!(
+        errors.is_empty(),
+        "Split tree invariant violation: {:?}",
+        errors
+    );
+}
+
 fn cell_dimensions(size: &TerminalSize) -> TerminalSize {
     TerminalSize {
         rows: 1,
@@ -1255,8 +1328,17 @@ impl TabInner {
 
             self.size = size;
 
+            // Enforce top-down constraints before applying sizes to panes.
+            // adjust_y_size/adjust_x_size preserve invariants when starting
+            // from a consistent tree, but this defends against accumulated
+            // drift from any source.
+            reconcile_tree_sizes(self.pane.as_mut().unwrap(), &size);
+
             // And then resize the individual panes to match
             apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
+
+            #[cfg(debug_assertions)]
+            debug_assert_tree_invariants(self.pane.as_ref().unwrap(), &self.size);
         }
 
         Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
@@ -1337,6 +1419,9 @@ impl TabInner {
                 // parent-child constraints. This fixes inconsistencies caused
                 // by interleaved per-pane resize PDUs from different events.
                 reconcile_tree_sizes(root, &self.size);
+
+                #[cfg(debug_assertions)]
+                debug_assert_tree_invariants(root, &self.size);
             }
         }
         Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
