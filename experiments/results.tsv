@@ -1,0 +1,7 @@
+commit	tests_pass	live_violations	status	description
+4f927e17	5/5	6	keep	reconcile_tree_sizes in rebuild_splits_sizes_from_contained_panes
+73508dfa	7/7	6	keep	add tests for column width inconsistency (Pattern 2) and deep nesting (Pattern 3)
+a916753d	9/9	6	keep	add T-shaped layout test (Pattern 4) and all-layouts regression guard
+af4d7bdd	9/9	6	keep	harden resize() path with reconcile + debug invariant assertions
+46a77afd	11/11	6	keep	add 2x2 grid and first-pane-stale interleaving tests
+9eac385d	11/11	6	keep	add grid layout to all-layouts regression guard
