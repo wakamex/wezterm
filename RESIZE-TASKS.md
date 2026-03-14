@@ -126,11 +126,12 @@ The core bug is architectural: per-pane resize PDUs are fire-and-forget async ta
 - Root cause: `ClientPane::resize()` spawns independent `promise::spawn::spawn(...).detach()` per pane
 - Pass criterion: `stress-resize.sh --rounds 1000` produces zero violations
 
-### Phase 3: Upstream
+### Phase 3: Upstream (in progress)
 
-- [ ] Clean up commits for PR to wezterm/wezterm
-- [ ] Write PR description linking #6052, #5011, #4878, #5117
+- [ ] Clean up commits for PR to wezterm/wezterm (squash RESIZE: commits into fix + tests)
+- [x] Write PR description — see PR-DESCRIPTION.md
 - [ ] Coordinate with #7590 (focus loop fix, same #6885 umbrella)
+- [ ] Build fix branch binary, validate live violations → 0
 
 ---
 
