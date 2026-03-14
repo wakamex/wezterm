@@ -44,18 +44,20 @@ The core bug is architectural: per-pane resize PDUs are fire-and-forget async ta
 | `make_interleaved_resize_state()` | mux/src/tab.rs (test module) | Simulates PDU interleaving from two rapid resize events |
 | `wezterm cli resize-pane` | wezterm/src/cli/resize_pane.rs | Sends raw `Pdu::Resize` per pane (for scripted interleaving) |
 | `wezterm cli list --format tree` | wezterm/src/cli/list.rs | Dumps split tree with node-level sizes as JSON |
+| `check-tree-invariants.py` | repo root | Tree-level checker: reads `--format tree`, validates split node constraints |
+| `reproduce-interleaving.sh` | repo root | End-to-end: creates layout, sends interleaved resize-pane PDUs, checks |
 
 ---
 
 ## Current State
 
 - **Branch:** `investigate_pane_resizing` (tooling), `fix/6885-minimal+coalesce` (fix)
-- **Fix implemented:** `reconcile_tree_sizes()` — top-down constraint enforcement called from `rebuild_splits_sizes_from_contained_panes()`. Preserves first child's primary dimension, adjusts second child to fit.
-- **Tests:** 3 new tests on the fix branch:
-  - `nested_split_normal_resize_preserves_invariants` — baseline regression guard
-  - `interleaved_pdus_break_pane_size_invariant` — proves the bug exists at pane level
-  - `reconcile_fixes_interleaved_pdu_overflow` — proves the fix works
-- **Live violations:** 6 tabs in current session show overflow/underflow (detected by `track-pane-sizes.py`). These are on the server running WITHOUT the fix.
+- **Fix implemented:** `reconcile_tree_sizes()` — top-down constraint enforcement called from both `rebuild_splits_sizes_from_contained_panes()` and `TabInner::resize()`. `debug_assert_tree_invariants()` catches violations in debug builds.
+- **Tests:** 11 tests on the fix branch. 6 fail without fix, all 11 pass with fix.
+  - Bug-proof: `interleaved_pdus_break_pane_size_invariant`, `interleaved_pdus_break_column_width`
+  - Fix-proof: `reconcile_fixes_interleaved_pdu_overflow`, `deep_nested_interleaved_pdus`, `t_shaped_interleaved_pdus`, `grid_interleaved_pdus`, `first_pane_stale_interleaving`
+  - Baselines: `nested_split_normal_resize_preserves_invariants`, `all_layouts_resize_preserves_invariants`, `tab_splitting`, `tab_is_send_and_sync`
+- **Live violations:** 6 tabs show overflow/underflow on the server running WITHOUT the fix.
 
 ---
 
