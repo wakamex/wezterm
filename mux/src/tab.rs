@@ -3780,6 +3780,67 @@ mod test {
         check("T-shape after removing bottom", &tab);
     }
 
+    /// Verify that adding splits to an already-nested layout and then
+    /// resizing preserves invariants. Tests the split_and_insert path
+    /// combined with resize.
+    #[test]
+    fn split_then_resize_preserves_invariants() {
+        let size = TerminalSize {
+            rows: 80,
+            cols: 160,
+            pixel_width: 1600,
+            pixel_height: 2000,
+            dpi: 96,
+        };
+
+        let check = |label: &str, tab: &Tab| {
+            let inner = tab.inner.lock();
+            let errors = check_tree_invariants(inner.pane.as_ref().unwrap(), &inner.size);
+            assert!(errors.is_empty(), "{}: {:?}", label, errors);
+        };
+
+        // Start with L-shape, then add a 4th pane by splitting the left
+        let (tab, _pane0, _pane1, _pane2) = make_l_shaped_tab(size);
+        tab.resize_split_by(1, 10);
+
+        let vsplit = tab
+            .compute_split_size(
+                0,
+                SplitRequest {
+                    direction: SplitDirection::Vertical,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let pane3 = FakePane::new(3, vsplit.second);
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Vertical,
+                ..Default::default()
+            },
+            pane3,
+        )
+        .unwrap();
+
+        check("L-shape + extra split", &tab);
+
+        // Resize up
+        let bigger = TerminalSize {
+            rows: 100,
+            cols: 200,
+            pixel_width: 2000,
+            pixel_height: 2500,
+            dpi: 96,
+        };
+        tab.resize(bigger);
+        check("after resize up", &tab);
+
+        // Resize back down
+        tab.resize(size);
+        check("after resize back", &tab);
+    }
+
     fn is_send_and_sync<T: Send + Sync>() -> bool {
         true
     }
