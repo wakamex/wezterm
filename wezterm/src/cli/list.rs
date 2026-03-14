@@ -8,7 +8,8 @@ use wezterm_term::TerminalSize;
 #[derive(Debug, Parser, Clone, Copy)]
 pub struct ListCommand {
     /// Controls the output format.
-    /// "table" and "json" are possible formats.
+    /// "table", "json", and "tree" are possible formats.
+    /// "tree" outputs the raw split tree with node-level sizes.
     #[arg(long = "format", default_value = "table")]
     format: CliOutputFormatKind,
 }
@@ -17,8 +18,23 @@ impl ListCommand {
     pub async fn run(&self, client: Client) -> anyhow::Result<()> {
         let out = std::io::stdout();
 
-        let mut output_items = vec![];
         let panes = client.list_panes().await?;
+
+        // Tree format: output the raw PaneNode trees with split node sizes
+        if matches!(self.format, CliOutputFormatKind::Tree) {
+            let mut trees = vec![];
+            for (tabroot, tab_title) in panes.tabs.iter().zip(panes.tab_titles.iter()) {
+                trees.push(serde_json::json!({
+                    "tab_title": tab_title,
+                    "tree": tabroot,
+                }));
+            }
+            serde_json::to_writer_pretty(out.lock(), &trees)?;
+            println!();
+            return Ok(());
+        }
+
+        let mut output_items = vec![];
 
         for (tabroot, tab_title) in panes.tabs.into_iter().zip(panes.tab_titles.iter()) {
             let mut cursor = tabroot.into_tree().cursor();
@@ -94,6 +110,7 @@ impl ListCommand {
                     .collect::<Vec<_>>();
                 tabulate_output(&cols, &data, &mut std::io::stdout().lock())?;
             }
+            CliOutputFormatKind::Tree => unreachable!("handled above"),
         }
         Ok(())
     }

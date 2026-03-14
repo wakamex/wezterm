@@ -15,6 +15,7 @@ mod list_clients;
 mod move_pane_to_new_tab;
 mod proxy;
 mod rename_workspace;
+mod resize_pane;
 mod send_text;
 mod set_tab_title;
 mod set_window_title;
@@ -29,6 +30,8 @@ enum CliOutputFormatKind {
     Table,
     #[command(name = "json", about = "JSON format")]
     Json,
+    #[command(name = "tree", about = "JSON tree with split node sizes")]
+    Tree,
 }
 
 impl std::str::FromStr for CliOutputFormatKind {
@@ -37,6 +40,7 @@ impl std::str::FromStr for CliOutputFormatKind {
         match s {
             "json" => Ok(CliOutputFormatKind::Json),
             "table" => Ok(CliOutputFormatKind::Table),
+            "tree" => Ok(CliOutputFormatKind::Tree),
             _ => Err(anyhow::anyhow!("unknown output format")),
         }
     }
@@ -163,6 +167,12 @@ Outputs the pane-id for the newly created pane on success"
     /// Zoom, unzoom, or toggle zoom state
     #[command(name = "zoom-pane", rename_all = "kebab")]
     ZoomPane(zoom_pane::ZoomPane),
+
+    /// Resize an individual pane to a specific size.
+    /// Sends a raw Pdu::Resize to the mux server, useful for testing
+    /// resize behavior and reproducing interleaving bugs.
+    #[command(name = "resize-pane", rename_all = "kebab")]
+    ResizePane(resize_pane::ResizePane),
 }
 
 async fn run_cli_async(opts: &crate::Opt, cli: CliCommand) -> anyhow::Result<()> {
@@ -199,6 +209,7 @@ async fn run_cli_async(opts: &crate::Opt, cli: CliCommand) -> anyhow::Result<()>
         CliSubCommand::SetWindowTitle(cmd) => cmd.run(client).await,
         CliSubCommand::RenameWorkspace(cmd) => cmd.run(client).await,
         CliSubCommand::ZoomPane(cmd) => cmd.run(client).await,
+        CliSubCommand::ResizePane(cmd) => cmd.run(client).await,
     }
 }
 

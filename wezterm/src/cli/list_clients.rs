@@ -109,6 +109,9 @@ impl ListClientsCommand {
 
                 tabulate_output(&cols, &data, &mut out.lock())?;
             }
+            CliOutputFormatKind::Tree => {
+                anyhow::bail!("tree format is not supported for list-clients");
+            }
         }
         Ok(())
     }
