@@ -48,7 +48,10 @@ if $RESTART; then
         kill "$PID"
         echo "  Killed PID $PID"
         echo ""
-        echo "Mac client disconnected. Reconnect, then run:"
+        echo "Reconnect from Mac. Your tabs will be restored automatically"
+        echo "(the new server reads session.json on startup)."
+        echo ""
+        echo "To also relaunch AI agents (claude, codex):"
         echo "  cd /code/wezterm && python3 wez-tabs restore"
     else
         echo "  No running mux server found"
