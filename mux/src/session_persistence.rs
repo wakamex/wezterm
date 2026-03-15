@@ -255,6 +255,11 @@ async fn restore_tab(
     let mut leaf_index = 0;
     restore_node(domain, &tab, &saved_tab.tree, &mut leaf_index).await?;
 
+    // Force a resize to reconcile the tree — the splits were created
+    // at intermediate sizes and may have accumulated inconsistencies
+    // (e.g., column heights not matching across an H-split).
+    tab.resize(restore_size);
+
     Ok(())
 }
 
