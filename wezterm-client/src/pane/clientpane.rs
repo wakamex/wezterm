@@ -409,24 +409,10 @@ impl Pane for ClientPane {
             // Invalidate any cached rows on a resize
             inner.make_all_stale();
 
-            // Individual per-pane Pdu::Resize is still sent for backwards
-            // compatibility. The batched ResizeTab PDU (sent by the GUI
-            // after tab.resize()) provides atomic delivery; the individual
-            // PDU is a fallback for older servers.
-            let client = Arc::clone(&self.client);
-            let remote_pane_id = self.remote_pane_id;
-            let remote_tab_id = self.remote_tab_id;
-            promise::spawn::spawn(async move {
-                client
-                    .client
-                    .resize(Resize {
-                        containing_tab_id: remote_tab_id,
-                        pane_id: remote_pane_id,
-                        size,
-                    })
-                    .await
-            })
-            .detach();
+            // Don't send individual per-pane Pdu::Resize — the batched
+            // ResizeTab PDU (sent by TabInner::resize after apply_sizes)
+            // handles this atomically. Individual sends interleave and
+            // cause nested split overflow.
             inner.update_last_send();
         }
         Ok(())
