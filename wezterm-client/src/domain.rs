@@ -256,6 +256,7 @@ pub struct ClientDomain {
     label: String,
     inner: Mutex<Option<Arc<ClientInner>>>,
     resync_in_progress: AtomicBool,
+    resync_pending: AtomicBool,
     local_domain_id: DomainId,
 }
 
@@ -407,6 +408,7 @@ impl ClientDomain {
             label,
             inner: Mutex::new(None),
             resync_in_progress: AtomicBool::new(false),
+            resync_pending: AtomicBool::new(false),
             local_domain_id,
         }
     }
@@ -484,20 +486,41 @@ impl ClientDomain {
         Ok(())
     }
 
-    /// Coalesce bursts of resync requests so that we don't run multiple
-    /// overlapping topology reconciliations at once.
+    /// Debounce bursts of resync requests. If a resync is already in
+    /// progress, mark a pending flag instead of dropping the request.
+    /// When the current resync finishes, it checks the flag and runs
+    /// one more to pick up any changes that arrived during the first.
     pub async fn resync_coalesced(&self) -> anyhow::Result<()> {
         if self.resync_in_progress.swap(true, Ordering::AcqRel) {
+            // A resync is running — mark that another is needed when it finishes
+            self.resync_pending.store(true, Ordering::Release);
             log::trace!(
-                "domain {} skipping overlapping resync request",
+                "domain {} resync already in progress, marked pending",
                 self.local_domain_id
             );
             return Ok(());
         }
 
-        let result = self.resync().await;
+        loop {
+            self.resync_pending.store(false, Ordering::Release);
+            let result = self.resync().await;
+            if let Err(err) = &result {
+                self.resync_in_progress.store(false, Ordering::Release);
+                return Err(anyhow::anyhow!("{:#}", err));
+            }
+
+            // If no more pending requests arrived during this resync, we're done
+            if !self.resync_pending.swap(false, Ordering::AcqRel) {
+                break;
+            }
+            log::trace!(
+                "domain {} running pending resync",
+                self.local_domain_id
+            );
+        }
+
         self.resync_in_progress.store(false, Ordering::Release);
-        result
+        Ok(())
     }
 
     pub fn process_remote_window_title_change(&self, remote_window_id: WindowId, title: String) {
