@@ -177,23 +177,20 @@ pub async fn restore_session(
     Ok(total_tabs)
 }
 
-/// Restore a single tab by walking the PaneNode tree.
+/// Restore a single tab by recursively walking the PaneNode tree.
+///
+/// Strategy: spawn the first leaf as the initial pane (creates the tab),
+/// then recursively split panes to match the tree structure. At each
+/// Split node, the left subtree already exists as the current pane,
+/// and the right subtree is created by splitting it.
 async fn restore_tab(
     domain: &Arc<dyn crate::domain::Domain>,
     saved_tab: &SavedTab,
     default_size: wezterm_term::TerminalSize,
     window_id: crate::WindowId,
 ) -> anyhow::Result<()> {
-    let mux = Mux::get();
+    let first_cwd = first_leaf_cwd(&saved_tab.tree);
 
-    // Count leaves to know how many panes to spawn
-    let leaf_cwds = collect_leaf_cwds(&saved_tab.tree);
-    if leaf_cwds.is_empty() {
-        return Ok(());
-    }
-
-    // Spawn the first pane (creates the tab)
-    let first_cwd = leaf_cwds[0].clone();
     let tab = domain
         .spawn(default_size, None::<CommandBuilder>, first_cwd, window_id)
         .await
@@ -201,103 +198,78 @@ async fn restore_tab(
 
     tab.set_title(&saved_tab.title);
 
-    // For a single-pane tab, we're done
-    if leaf_cwds.len() <= 1 {
-        return Ok(());
-    }
-
-    // For multi-pane tabs, recreate the split structure.
-    // Walk the tree and split as needed.
-    let split_ops = collect_split_ops(&saved_tab.tree, default_size);
-
-    for op in &split_ops {
-        let cwd = op.cwd.clone();
-        let pane = domain
-            .spawn_pane(op.size, None::<CommandBuilder>, cwd)
-            .await
-            .context("spawning split pane")?;
-
-        mux.add_pane(&pane).context("adding split pane to mux")?;
-
-        let request = crate::tab::SplitRequest {
-            direction: op.direction,
-            target_is_second: true,
-            top_level: false,
-            size: crate::tab::SplitSize::Cells(
-                match op.direction {
-                    crate::tab::SplitDirection::Horizontal => op.size.cols,
-                    crate::tab::SplitDirection::Vertical => op.size.rows,
-                }
-            ),
-        };
-
-        // Find the pane to split (last pane in the tab)
-        let panes = tab.iter_panes();
-        let split_index = if panes.is_empty() { 0 } else { panes.len() - 1 };
-
-        if let Err(err) = tab.split_and_insert(split_index, request, pane) {
-            log::warn!("Failed to split pane in tab '{}': {:#}", saved_tab.title, err);
-        }
-    }
+    // The first leaf is pane index 0. Now recursively split to create
+    // the rest of the tree. leaf_index tracks which pane index in the
+    // tab's pane list corresponds to the "current" left-side pane.
+    let mut leaf_index = 0;
+    restore_node(domain, &tab, &saved_tab.tree, &mut leaf_index).await?;
 
     Ok(())
 }
 
-/// Collect CWDs from all leaf panes in the tree (in preorder).
-fn collect_leaf_cwds(node: &PaneNode) -> Vec<Option<String>> {
-    let mut cwds = Vec::new();
-    match node {
-        PaneNode::Empty => {}
-        PaneNode::Leaf(entry) => {
-            cwds.push(
-                entry
-                    .working_dir
-                    .as_ref()
-                    .map(|url| url.url.path().to_string()),
-            );
+/// Recursively restore a PaneNode subtree.
+///
+/// For Leaf nodes: nothing to do (already exists as pane at `leaf_index`).
+/// For Split nodes: the left subtree is already the pane at `leaf_index`.
+///   Split that pane to create the right subtree, then recurse into both.
+fn restore_node<'a>(
+    domain: &'a Arc<dyn crate::domain::Domain>,
+    tab: &'a crate::tab::Tab,
+    node: &'a PaneNode,
+    leaf_index: &'a mut usize,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+    Box::pin(async move {
+        match node {
+            PaneNode::Empty => {}
+            PaneNode::Leaf(_) => {
+                // This leaf already exists — advance the index
+                *leaf_index += 1;
+            }
+            PaneNode::Split { left, right, node: split_data } => {
+                // First, recursively restore the left subtree.
+                // After this, all left-side leaves exist in the tab.
+                restore_node(domain, tab, left, leaf_index).await?;
+
+                // The pane we need to split is the one just before
+                // the current leaf_index (the last leaf of the left subtree)
+                let split_pane_index = leaf_index.saturating_sub(1);
+
+                // Spawn a new pane for the right side
+                let cwd = first_leaf_cwd(right);
+                let pane = domain
+                    .spawn_pane(split_data.second, None::<CommandBuilder>, cwd)
+                    .await
+                    .context("spawning pane for split")?;
+
+                Mux::get().add_pane(&pane)?;
+
+                let request = crate::tab::SplitRequest {
+                    direction: split_data.direction,
+                    target_is_second: true,
+                    top_level: false,
+                    size: crate::tab::SplitSize::Cells(
+                        match split_data.direction {
+                            crate::tab::SplitDirection::Horizontal => split_data.second.cols,
+                            crate::tab::SplitDirection::Vertical => split_data.second.rows,
+                        }
+                    ),
+                };
+
+                if let Err(err) = tab.split_and_insert(split_pane_index, request, pane) {
+                    log::warn!(
+                        "Failed to split pane {} ({:?}): {:#}",
+                        split_pane_index,
+                        split_data.direction,
+                        err
+                    );
+                }
+
+                // Now recursively restore the right subtree
+                restore_node(domain, tab, right, leaf_index).await?;
+            }
         }
-        PaneNode::Split { left, right, .. } => {
-            cwds.extend(collect_leaf_cwds(left));
-            cwds.extend(collect_leaf_cwds(right));
-        }
-    }
-    cwds
-}
-
-/// A split operation to recreate the tab layout.
-struct SplitOp {
-    direction: crate::tab::SplitDirection,
-    size: wezterm_term::TerminalSize,
-    cwd: Option<String>,
-}
-
-/// Walk the PaneNode tree and collect split operations needed
-/// to recreate the layout. Each Split node produces one operation
-/// for its right/second child.
-fn collect_split_ops(
-    node: &PaneNode,
-    default_size: wezterm_term::TerminalSize,
-) -> Vec<SplitOp> {
-    let mut ops = Vec::new();
-    match node {
-        PaneNode::Empty | PaneNode::Leaf(_) => {}
-        PaneNode::Split { left, right, node: split_data } => {
-            // Recurse into left first (it's the "existing" side)
-            ops.extend(collect_split_ops(left, default_size));
-
-            // The right side needs to be created via a split
-            let cwd = first_leaf_cwd(right);
-            ops.push(SplitOp {
-                direction: split_data.direction,
-                size: split_data.second,
-                cwd,
-            });
-
-            // Then recurse into right for any nested splits
-            ops.extend(collect_split_ops(right, default_size));
-        }
-    }
-    ops
+        Ok(())
+    })
 }
 
 /// Get the CWD of the first leaf in a subtree.
