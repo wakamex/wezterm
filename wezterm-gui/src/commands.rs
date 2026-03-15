@@ -1088,7 +1088,7 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             doc: "Closes the current pane, terminating the \
             processes that are running inside it."
                 .into(),
-            keys: vec![],
+            keys: vec![(Modifiers::SUPER, "d".into())],
             args: &[ArgType::ActivePane],
             menubar: &["Shell"],
             icon: Some("md_close_box_outline"),
@@ -1425,7 +1425,7 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         ScrollToBottom => CommandDef {
             brief: "Scroll to the bottom".into(),
             doc: "Scrolls to the bottom of the viewport".into(),
-            keys: vec![],
+            keys: vec![(Modifiers::SHIFT, "End".into())],
             args: &[ArgType::ActivePane],
             menubar: &["View"],
             icon: Some("md_format_align_bottom"),
@@ -1433,7 +1433,7 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         ScrollToTop => CommandDef {
             brief: "Scroll to the top".into(),
             doc: "Scrolls to the top of the viewport".into(),
-            keys: vec![],
+            keys: vec![(Modifiers::SHIFT, "Home".into())],
             args: &[ArgType::ActivePane],
             menubar: &["View"],
             icon: Some("md_format_align_top"),
@@ -1633,7 +1633,7 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         ShowTabNavigator => CommandDef {
             brief: "Navigate tabs".into(),
             doc: "Shows the tab navigator".into(),
-            keys: vec![],
+            keys: vec![(Modifiers::SUPER, "e".into())],
             args: &[ArgType::ActiveWindow],
             menubar: &["Window", "Select Tab"],
             icon: Some("cod_list_flat"),
@@ -1969,16 +1969,21 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &["Edit", "Copy Mode"],
             icon: None,
         },
-        RotatePanes(direction) => CommandDef {
-            brief: format!("Rotate panes {direction:?}").into(),
-            doc: format!("Rotate panes {direction:?}").into(),
+        RotatePanes(RotationDirection::Clockwise) => CommandDef {
+            brief: "Rotate panes clockwise".into(),
+            doc: "Rotate panes clockwise".into(),
+            keys: vec![(Modifiers::SUPER, "o".into())],
+            args: &[ArgType::ActivePane],
+            menubar: &["Window", "Rotate Pane"],
+            icon: Some("md_rotate_right"),
+        },
+        RotatePanes(RotationDirection::CounterClockwise) => CommandDef {
+            brief: "Rotate panes counter-clockwise".into(),
+            doc: "Rotate panes counter-clockwise".into(),
             keys: vec![],
             args: &[ArgType::ActivePane],
             menubar: &["Window", "Rotate Pane"],
-            icon: Some(match direction {
-                RotationDirection::Clockwise => "md_rotate_right",
-                RotationDirection::CounterClockwise => "md_rotate_left",
-            }),
+            icon: Some("md_rotate_left"),
         },
         SplitPane(split) => {
             let direction = split.direction;
