@@ -539,6 +539,7 @@ impl Publish {
         workspace: Option<&str>,
         domain: SpawnTabDomain,
         new_tab: bool,
+        attach: bool,
     ) -> anyhow::Result<bool> {
         if let Publish::TryPathOrPublish(gui_sock) = &self {
             let dom = config::UnixDomain {
@@ -598,6 +599,28 @@ impl Publish {
                         } else {
                             None
                         };
+
+                        // When --attach is set and the domain already has panes,
+                        // just activate the existing window without spawning.
+                        // This matches the documented behavior of --attach. (#7582)
+                        if attach {
+                            let panes = client.list_panes().await?;
+                            let domain_has_panes = panes.tabs.iter().any(|tab| {
+                                tab.root_size().is_some()
+                            });
+                            if domain_has_panes {
+                                log::info!(
+                                    "Domain already has panes and --attach was specified; \
+                                     attaching without spawning"
+                                );
+                                return Ok(codec::SpawnResponse {
+                                    pane_id: 0,
+                                    tab_id: 0,
+                                    window_id: window_id.unwrap_or(0),
+                                    size: config.initial_size(0, None),
+                                });
+                            }
+                        }
 
                         client
                             .spawn_v2(codec::SpawnV2 {
@@ -771,6 +794,7 @@ fn run_terminal_gui(opts: StartCommand, default_domain_name: Option<String>) -> 
             None => SpawnTabDomain::DefaultDomain,
         },
         opts.new_tab,
+        opts.attach,
     )? {
         return Ok(());
     }
