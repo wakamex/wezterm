@@ -1,0 +1,200 @@
+6397	Issues rotating panes when connected to mux-server
+7436	Nightly on Windows 11 launch fails with "LoadLibrary failed with error 126: The specified module could not be found."
+7661	tmux CC domain detach deadlocks entire GUI when last window is closed via Ctrl+D
+7660	Windows: Cannot spawn new admin instance when non-admin instance is running
+7427	Crash (segfault) with no apparent reason on mac
+7659	WezTerm SSH can't handle long passpharses
+6876	Introduce `win32_window_appearance` to override Windows setting
+7658	Fix transparent window flash on Windows during initial rendering
+7657	transparent window on launch
+4317	When closing tab or application, current focus window in tmux is closed on mac
+7656	tmux CC parser error on empty line during detach (pressing q)
+7654	fix: restore tab size after top-level split
+7650	padding distance to split lines
+7392	Startup error message on ubuntu 25.10
+7632	Crash in using Copilot Keyboard on Windows 11
+7649	Add WebGPU post-processing shader pipeline
+5182	[Feature Request] Cool Retro Term Shaders?
+6985	GPU Shader Effects
+7648	ssh_domains fails to authenticate with IdentityFile containing spaces on Windows
+7530	Rotate panels too
+7193	feat(macos): new MACOS_DISABLE_TITLEBAR_DRAG window decoration and refactor macOS window decoration logic
+7199	Fix: left status bar overlaps with window buttons (#7197)
+7202	fix(units): allow GuiPosition to parse pt and cell units
+7200	feat(terminal): Implement dynamic DECRQSS and DECRQM cursor queries
+5892	Kitty image protocol visual glitches when updating placement location
+6534	hovering the mouse focuses options on the launcher
+4610	Separate underline thickness and thickness of other glyphs
+7647	Viable Windows signing found
+7328	MSIX Packaging and Windows Default Terminal Integration
+7117	"Unrecognized tmux cc line" error for %unlinked-window-renamed (when using multiple sessions)
+6978	Using wezterm nightly + PowerShell 5.1 with window_background_opacity < 1.0 results in broken transparency
+6371	Slow when scrolling down a file while using nvim
+7645	Scrolling inside TUIs (tmux, vim, emacs) is sluggish with precision pointing devices (trackpad, Magic Mouse)
+7191	Improve scroll handling: add gesture fan-out and precise scroll scale
+7144	Cannot input Chinese characters in control mode
+3518	Add transparent background option
+7644	"thumbnail scrollbar" or "overview scrollbar"
+7643	Focus the originating pane/tab when a toast notification is clicked
+7171	Toast Notification Changing to Tab that sent it
+7642	Shell Integration docs for Powershell don't handle non-filesystem CWD
+3979	A way to control client clipboard from server shell
+7641	Feature request: CLI/Lua API to set per-pane border color dynamically
+346	Force/override a font for a range of codepoints
+5098	When doing `wezterm start` with `--config-file`, window opens behind main window
+7326	`wezterm start` doesn't start window on top and focused sometimes on macos
+7623	wez.wezterm.nightly appears mispackaged in winget: resolves to stable 20240203 and fails hash validation
+7637	Add window-tab-switched event for Lua config
+7463	Update flake.lock
+3609	Duplicated key-inputs (characters, commands)
+1751	Dropdown/Guake/Visor/hotkey terminal feature
+7633	build(deps): bump getrandom from 0.3 to 0.4
+7180	WezTerm won't open on Ubuntu with Wayland
+7609	POC: dirty-region tracking and idle skip for PureCpu renderer
+6994	Ctrl+Shift+, not generating proper escape sequence with Kitty keyboard protocol
+7631	Sending Kitty images via shared memory does not work on macOS
+7472	feat: add custom post-processing shader support for WebGPU backend
+3328	Some windows don't update their colour scheme when system theme changes
+2864	Vim theme
+5318	set_config_overrides overrides active key_table
+7630	Prompt scrolls down to the bottom whenever the window is resized on hyprland
+7618	Implement tab:move_to_window method to allow moving tabs between windows using Lua
+7444	Fix render loop freeze when closing workspaces
+2972	How to balance all panes in an even layout 
+4633	Window is resized after Mac sleeps when connected to external monitor
+6223	When the titlebar is disabled and the window is maximized, the taskbar, which is automatically hidden, does not appear
+7627	CJK character selection highlight is misaligned with actual text on macOS
+549	Ability to drag re-order tabs, panes
+7626	fix: suppress duplicate DA responses for tmux control mode panes
+7574	Add vertical tab bar support (Left/Right positioning)
+7624	Add clipboard image paste support with Ctrl+V smart paste for all platforms
+3812	Smooth Scrolling
+7601	fix(wayland): prevent title bar with window_decorations = "NONE"
+7622	Use NSVisualEffectView for Window background blur on macOS
+7591	feat: stretch fancy tab bar tabs to fill available width
+5284	wezterm doesn't redraw (or lags) on Plasma 6 + Wayland + Nvidia with config.enable_wayland=true
+6185	adds HideOtherApplications (for macOS)
+5366	Mouse freezes, skips, and stutters over the wezterm window, recovers as soon as it leaves.
+7617	Fix X11 EGL surface use-after-free during window destruction
+4493	Path and MetaData objects + `wezterm.<functions>`
+7615	wayland: Ext background effect v1
+7614	WSL: Pasting creates ghost empty entries in Windows clipboard history
+7611	WezTerm engages adaptive sync
+7612	Drag-and-drop support for URLs from browser
+7439	Windows build creates gui-sock-* Unix socket files when launched via wezterm start --cwd from Explorer context menu
+6334	Set max_fps to 120 by default instead of 60
+6381	Wezterm not picking up config in linked config folder on Windows
+7602	tweak(ui::tabbar)[#6739]: flip the black tab shape
+7608	POC: PureCpu software renderer (no GPU required)
+7607	POC: pure-Rust font stack (replace FreeType, HarfBuzz, Cairo, fontconfig)
+7610	fix: sync user_vars on mux reconnect (Issue #5832)
+7596	generate 256 palette
+7606	feat: add `Child::main_thread_handle`
+7605	feat: add option to disable usage of `PSUEDOCONSOLE_INHERIT_CURSOR`
+7604	feat: add `CommandBuilder::creation_flags`
+7385	feat: smart case search
+6673	window_decorations = "NONE" not working with enable_wayland = true
+4592	Support voice input on macOS
+6739	Bottom tab bar design
+6006	Ctrl+Scrolllock crashes Wezterm
+7497	Dynamic window size only works for the first window
+7600	`window_decoration` to `NONE` displays native title bar on COSMIC desktop
+5832	User vars become unset after detach and re-attach to multiplexer Unix domain
+7597	Many settings from the website's documentation are not recognized
+6785	Text rendering and character baseline inconsistent when changing line_height
+6685	Clipboard (most times) not working between terminals
+5141	Jump to semantic regions not working through non-local domains
+7216	Implement get_semantic_zones() for ClientPane
+6341	Next Release Checklist
+7595	theme: add humans color schema
+7034	fix: save the wayland selection offer to every CopyAndPaste
+7592	windows: add native ARM64 build, packaging, and runtime support
+7593	ci: use windows-2025 runner
+7590	Fix: flickering across multiple mux clients
+3237	Provide a way to save the current layout
+7491	Fix open hyperlink bindings with mouse reporting
+7527	## Unbounded PDU memory allocation causes OOM crashes and stack overflow
+1333	Support for Devanagari / displaying text in Bangla
+7520	Quit Opencode will close WezTerm tab
+6591	The name of the Command Palette Item is not right
+7585	docs: typo on 8-bit escape sequence recognition
+7584	FIX: infinite feedback loop on slow SSHMUX connections when pane-switching, which hangs wezterm
+7583	FIX: propagate --attach flag when delegating to existing GUI
+7582	Flag --attach ignored when delegating to existing GUI instance
+7524	detect_password_input doesn't display lock icon
+6485	Border problems with the rounded corners on macOS.
+7453	fix macOS dictation support with new color options to customize the preview text
+7580	chore: use `LazyLock` instead of `lazy_static`
+4922	posiible bug: mouse scroll in alternate mode not working under multiplexing
+1396	portable-pty example not working properly on Windows
+5164	format-tab-title with use_fancy_tab_bar results in invalid hover detection
+7573	toast_notification has no reliable  timeout support
+7572	Initialinze a pane with launch menu items (profiles).
+3537	Allow the tab bar to be rendered on the side
+7570	Wrongly rendering ghost character when two or more wide characters are followed by a Unicode Variation Selector
+5468	option key not working on mac
+4536	CTRL-click does not work for opening links when bypass_mouse_reporting_modifiers is also CTRL
+7438	After closing a workspace Wezterm doesn't redraw until a key is pressed
+7566	fancy tab bar: fix layout issues with macOS native traffic light buttons
+7551	[Bug] Fancy tab bar: left_status obscured by macOS traffic light buttons and has excessive gap before tabs
+6522	Can't use 'Next' and 'Prev' with ActivatePaneDirection
+5983	add support for: `cmd+shift+left arrow|right arrow` -- to select text to left/right of cursor to end of line
+6454	Allow automatic light/dark mode detection from applications running within the terminal (CSI 2031)
+7568	Option to be able to clip last few pixels of last line on the terminal so content can fully fill the screen
+7540	SSHMUX get confused and rapidly redraws and moves panes eventually leading to crash
+4488	Plugin unsupported URL protocol error
+7510	termwindow: emit pane-focus-changed window event
+7537	cpu hog
+6435	Wezterm occasionally interprets single clicks as double clicks (or triple lcicks
+7550	Add support for floating pane
+4683	Wezterm does not preserve tab characters
+7563	build(deps): bump time from 0.3.44 to 0.3.47
+7561	Suppport for fixedbitset 0.5
+7560	Wezterm doesn't enter fullscreen when opened from another fullscreen app on macOS
+7558	kitty: improve animated image handling
+7534	Windows: Support being set as the default terminal app
+7559	build(deps): bump git2 from 0.20.2 to 0.20.4
+7557	fix(mux): ensure runtime directory exists before creating ssh agent symlink
+7556	fix(gui): handle IME committed text in prompt overlays
+7553	Toast notifications on KDE plasma do not expire
+5180	Allow Speech Recognition (dictate) on macOS
+7063	Ctrl-shift-u uinput on linux/X, again (sorry!)
+7555	fix: set DBus notification priority to normal
+7554	build(deps): bump bytes from 1.10.1 to 1.11.1
+4962	Wezterm does not have window decorations/titlebar on Mutter/Wayland
+7552	[termwiz] How to have a panic handler (that does not eat the message)
+6756	WezTerm Shell Context Menu for Windows 11
+6257	Local file links as hyperlinks
+4145	win32_system_backdrop Acrylic not working
+6265	Cannot get Wezterm Terminal Transparent/Acrylic BG on Windows
+7549	Release new `termwiz`
+4378	One scroll bar for each pane
+7494	fix(macos): improve IME preedit handling
+7546	Variable font (Berkeley Mono Variable) displaying as italic/oblique
+7548	Treat SCTKWindowState::TILED as a maximized state
+7449	Add config option for debounce when searching
+7095	adopt sctk-adwaita as our frame on wayland
+7539	Change display order of `key` and `mode` in `show-keys --lua`
+7544	Support directly specifying initial user vars as part of SpawnCommand
+7097	kitty keyboard state not propagated over mux connection
+7542	fix kitty keyboard protocol not work in mux mode
+7538	input method selection menu is hidden after full screen
+6052	resizing window does not resize panes proportionally
+7535	Windows: support profiles/launchables installed for Windows terminal
+6617	WebGpu and Wayland Crash (Nvidia?) - Protocol Error 7 on object @0, dmabufs
+7532	Allow retrieving user variables in mux-is-process-stateful handlers
+7000	Wezterm is haunted
+7531	Claude text entry freezes / no scrollbar
+7017	Failure to update or redraw display on WebGpu with nvidia 575.57.08
+7529	Fix RefCell borrow conflict when toggling IME on Windows
+2987	Bad prompt on resize behavior
+7157	WezTerm crashes randomly when using CorvusSKK (Japanese IME) on Windows10
+7528	front_end, OpenGL and Software doesn't render anything after upgrading to AMD driver, 26.1.1
+4484	Pane focus changing constantly despite no input
+7526	fix(wezterm-gui): max tab title length
+986	Kitty Image Protocol Support
+7523	emoji don't render correctly (size issues, presentation flickering, width encroaching)
+7522	macOS install docs still recommend `--no-quarantine` which is deprecated in Homebrew
+7521	wezterm.lua doesn,t excist
+7519	Windows sleep/resume causes wezterm-gui.exe crash in d3d11.dll (APPCRASH)
+7518	termwiz has an doc issue with MouseEvent and PixelMouseEvent
