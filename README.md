@@ -1,8 +1,47 @@
-# Wez's Terminal
+# Wez's Terminal (wakamex fork)
 
 <img height="128" alt="WezTerm Icon" src="https://raw.githubusercontent.com/wezterm/wezterm/main/assets/icon/wezterm-icon.svg" align="left"> *A GPU-accelerated cross-platform terminal emulator and multiplexer written by <a href="https://github.com/wez">@wez</a> and implemented in <a href="https://www.rust-lang.org/">Rust</a>*
 
 User facing docs and guide at: https://wezterm.org/
+
+## About this fork
+
+This is an actively maintained fork of [wezterm/wezterm](https://github.com/wezterm/wezterm). Upstream development has slowed, and this fork fixes bugs that affect daily mux server usage.
+
+### What's changed
+
+**10 bug fixes** — see [CHANGELOG-FORK.md](CHANGELOG-FORK.md) for details:
+
+- Nested split pane sizes diverging after window resize (#6052, #5011, #5117)
+- Infinite loop when shrinking window with splits (#4878)
+- OOM crash from oversized PDU allocation (#7527)
+- GUI deadlock on tmux CC domain detach (#7661)
+- Pane rotation not syncing to mux server (#6397)
+- `--attach` flag ignored when delegating to running instance (#7582)
+- Tab size wrong after top-level split (#7654, #2579, #4984)
+- tmux CC parser error on empty line during detach (#7656)
+- Batched resize PDU to prevent interleaving (`ResizeTab`, codec v46)
+- GUI clamp for zero-dimension resize requests
+
+**5 new default key bindings:**
+
+| Key | Action |
+|-----|--------|
+| Ctrl+Shift+D (Cmd+D) | Close current pane |
+| Shift+Home | Scroll to top |
+| Shift+End | Scroll to bottom |
+| Ctrl+Shift+O (Cmd+O) | Rotate panes clockwise |
+| Ctrl+Shift+E (Cmd+E) | Tab navigator |
+
+Full hotkey reference: [HOTKEYS.md](HOTKEYS.md)
+
+### Compatibility
+
+- Codec version bumped to 46 (new `ResizeTab` and `RotatePanes` PDUs)
+- Clients and servers must both run this fork for the new PDU types to work
+- Falls back gracefully to per-pane resize for older servers
+
+---
 
 ![Screenshot](docs/screenshots/two.png)
 
