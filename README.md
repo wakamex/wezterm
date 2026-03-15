@@ -10,7 +10,7 @@ This is an actively maintained fork of [wezterm/wezterm](https://github.com/wezt
 
 ### What's changed
 
-**10 bug fixes** — see [CHANGELOG-FORK.md](CHANGELOG-FORK.md) for details:
+**Bug fixes** — see [CHANGELOG-FORK.md](CHANGELOG-FORK.md) for details:
 
 - Nested split pane sizes diverging after window resize (#6052, #5011, #5117)
 - Infinite loop when shrinking window with splits (#4878)
@@ -20,8 +20,22 @@ This is an actively maintained fork of [wezterm/wezterm](https://github.com/wezt
 - `--attach` flag ignored when delegating to running instance (#7582)
 - Tab size wrong after top-level split (#7654, #2579, #4984)
 - tmux CC parser error on empty line during detach (#7656)
-- Batched resize PDU to prevent interleaving (`ResizeTab`, codec v46)
+- Resize feedback loop between client and server
 - GUI clamp for zero-dimension resize requests
+
+**Session persistence** — tabs survive server restarts:
+- Auto-saves tab layout, split tree structure, working directories, and titles every 60s and on SIGTERM
+- Auto-restores on startup with correct nested splits and proportional sizing
+- `wez-tabs save/restore/show` CLI for manual control and agent relaunching
+
+**Window geometry** — macOS remembers window position and size across restarts via native `NSWindow` autosave
+
+**Resize stability:**
+- Batched `ResizeTab` PDU prevents per-pane interleaving
+- Server suppresses self-echo `TabResized` to break feedback loops while forwarding to other clients
+- Resync debounce queues instead of drops overlapping requests
+
+**Tab titles** — user-set titles (via Ctrl+Shift+<) are no longer overwritten by terminal escape sequences
 
 **5 new default key bindings:**
 
@@ -37,9 +51,8 @@ Full hotkey reference: [HOTKEYS.md](HOTKEYS.md)
 
 ### Compatibility
 
-- Codec version bumped to 46 (new `ResizeTab` and `RotatePanes` PDUs)
-- Clients and servers must both run this fork for the new PDU types to work
-- Falls back gracefully to per-pane resize for older servers
+- Codec version 45 (backwards compatible with upstream clients)
+- New PDU types (`ResizeTab`, `RotatePanes`) are additive — older clients ignore them gracefully
 
 ---
 
