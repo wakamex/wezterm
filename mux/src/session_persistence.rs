@@ -41,6 +41,37 @@ fn session_path() -> PathBuf {
     config::RUNTIME_DIR.join("session.json")
 }
 
+/// Fix degenerate split sizes in a PaneNode tree before saving.
+/// If a split has one side < 3 cols or rows, rebalance to 50/50.
+/// This prevents broken layouts from being persisted and restored.
+fn heal_tree(node: &mut PaneNode) {
+    if let PaneNode::Split { left, right, node: split_data } = node {
+        let min_dim = 3;
+        match split_data.direction {
+            crate::tab::SplitDirection::Horizontal => {
+                if split_data.first.cols < min_dim || split_data.second.cols < min_dim {
+                    let total = split_data.first.cols + 1 + split_data.second.cols;
+                    let half = total.saturating_sub(1) / 2;
+                    split_data.first.cols = half;
+                    split_data.second.cols = total.saturating_sub(1 + half);
+                    log::debug!("Healed H-split: {}+1+{} = {}", half, total.saturating_sub(1+half), total);
+                }
+            }
+            crate::tab::SplitDirection::Vertical => {
+                if split_data.first.rows < min_dim || split_data.second.rows < min_dim {
+                    let total = split_data.first.rows + 1 + split_data.second.rows;
+                    let half = total.saturating_sub(1) / 2;
+                    split_data.first.rows = half;
+                    split_data.second.rows = total.saturating_sub(1 + half);
+                    log::debug!("Healed V-split: {}+1+{} = {}", half, total.saturating_sub(1+half), total);
+                }
+            }
+        }
+        heal_tree(left);
+        heal_tree(right);
+    }
+}
+
 /// Save the current mux session to disk.
 pub fn save_session() -> anyhow::Result<PathBuf> {
     let mux = Mux::try_get().context("no mux instance")?;
@@ -52,7 +83,10 @@ pub fn save_session() -> anyhow::Result<PathBuf> {
             let mut tabs = Vec::new();
             for tab in window.iter() {
                 let title = tab.get_title();
-                let tree = tab.codec_pane_tree();
+                let mut tree = tab.codec_pane_tree();
+                // Fix any degenerate splits (< 3 cols/rows on one side)
+                // before saving, so the restore produces a usable layout
+                heal_tree(&mut tree);
                 tabs.push(SavedTab { title, tree });
             }
             if !tabs.is_empty() {
@@ -269,7 +303,9 @@ fn restore_node<'a>(
                     direction: split_data.direction,
                     target_is_second: true,
                     top_level: false,
-                    size: crate::tab::SplitSize::Percent(pct.max(5).min(95)),
+                    // Clamp to 10-90% to prevent degenerate splits where
+                    // one side gets 1-2 cols/rows
+                    size: crate::tab::SplitSize::Percent(pct.max(10).min(90)),
                 };
 
                 if let Err(err) = tab.split_and_insert(split_pane_index, request, pane) {
