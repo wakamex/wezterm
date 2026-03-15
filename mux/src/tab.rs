@@ -4026,6 +4026,203 @@ mod test {
         );
     }
 
+    /// Verify that splitting a pane produces children with non-degenerate
+    /// sizes. This catches the race condition where split-pane produces
+    /// 1-row or 1-col panes because the server used a stale pane size.
+    #[test]
+    fn split_produces_nondegenerate_panes() {
+        let size = TerminalSize {
+            rows: 68,
+            cols: 249,
+            pixel_width: 2490,
+            pixel_height: 1768,
+            dpi: 96,
+        };
+        let tab = Tab::new(&size);
+        tab.assign_pane(&FakePane::new(0, size));
+
+        // H-split: 50%
+        let hsplit = tab
+            .compute_split_size(
+                0,
+                SplitRequest {
+                    direction: SplitDirection::Horizontal,
+                    size: SplitSize::Percent(50),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let pane1 = FakePane::new(1, hsplit.second);
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                size: SplitSize::Percent(50),
+                ..Default::default()
+            },
+            pane1,
+        )
+        .unwrap();
+
+        let panes = tab.iter_panes();
+        assert_eq!(2, panes.len());
+        // Both panes should be roughly half width, full height
+        for p in &panes {
+            assert!(
+                p.width > 50,
+                "H-split pane width {} is too small (expected ~124)",
+                p.width
+            );
+            assert_eq!(
+                p.height, 68,
+                "H-split pane height {} should be full tab height 68",
+                p.height
+            );
+        }
+
+        // V-split on right pane: 50%
+        let vsplit = tab
+            .compute_split_size(
+                1,
+                SplitRequest {
+                    direction: SplitDirection::Vertical,
+                    size: SplitSize::Percent(50),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let pane2 = FakePane::new(2, vsplit.second);
+        tab.split_and_insert(
+            1,
+            SplitRequest {
+                direction: SplitDirection::Vertical,
+                size: SplitSize::Percent(50),
+                ..Default::default()
+            },
+            pane2,
+        )
+        .unwrap();
+
+        let panes = tab.iter_panes();
+        assert_eq!(3, panes.len());
+        // All panes should have > 5 rows and > 5 cols
+        for p in &panes {
+            assert!(
+                p.width > 5,
+                "pane {} width {} is degenerate",
+                p.pane.pane_id(),
+                p.width,
+            );
+            assert!(
+                p.height > 5,
+                "pane {} height {} is degenerate",
+                p.pane.pane_id(),
+                p.height,
+            );
+        }
+
+        // Right column heights should sum correctly
+        let right_panes: Vec<_> = panes.iter().filter(|p| p.left > 0).collect();
+        assert_eq!(2, right_panes.len());
+        let right_total = right_panes[0].height + 1 + right_panes[1].height;
+        assert_eq!(
+            right_total, 68,
+            "right column total {} should equal tab height 68",
+            right_total
+        );
+    }
+
+    /// Verify that multiple sequential V-splits on the same pane produce
+    /// correctly proportioned panes (not "No space for split!" errors).
+    #[test]
+    fn multiple_vsplits_in_column() {
+        let size = TerminalSize {
+            rows: 68,
+            cols: 249,
+            pixel_width: 2490,
+            pixel_height: 1768,
+            dpi: 96,
+        };
+        let tab = Tab::new(&size);
+        tab.assign_pane(&FakePane::new(0, size));
+
+        // H-split first
+        let hsplit = tab
+            .compute_split_size(
+                0,
+                SplitRequest {
+                    direction: SplitDirection::Horizontal,
+                    size: SplitSize::Percent(50),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                size: SplitSize::Percent(50),
+                ..Default::default()
+            },
+            FakePane::new(1, hsplit.second),
+        )
+        .unwrap();
+
+        // V-split the right pane twice (3 panes in right column)
+        for i in 0..2 {
+            let pane_index = tab.iter_panes().len() - 1; // last pane
+            let vsplit = tab
+                .compute_split_size(
+                    pane_index,
+                    SplitRequest {
+                        direction: SplitDirection::Vertical,
+                        size: SplitSize::Percent(50),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            tab.split_and_insert(
+                pane_index,
+                SplitRequest {
+                    direction: SplitDirection::Vertical,
+                    size: SplitSize::Percent(50),
+                    ..Default::default()
+                },
+                FakePane::new(10 + i, vsplit.second),
+            )
+            .unwrap();
+        }
+
+        let panes = tab.iter_panes();
+        assert_eq!(4, panes.len(), "should have 4 panes: 1 left + 3 right");
+
+        // All panes non-degenerate
+        for p in &panes {
+            assert!(
+                p.height >= 10,
+                "pane {} height {} is too small",
+                p.pane.pane_id(),
+                p.height,
+            );
+        }
+
+        // Right column sums correctly
+        let right_panes: Vec<_> = panes.iter().filter(|p| p.left > 0).collect();
+        assert_eq!(3, right_panes.len());
+        let right_total: usize =
+            right_panes.iter().map(|p| p.height).sum::<usize>() + right_panes.len() - 1;
+        assert_eq!(
+            right_total, 68,
+            "right column total {} should equal tab height 68",
+            right_total
+        );
+
+        // Check tree invariants
+        let inner = tab.inner.lock();
+        let errors = check_tree_invariants(inner.pane.as_ref().unwrap(), &inner.size);
+        assert!(errors.is_empty(), "invariants violated: {:?}", errors);
+    }
+
     fn is_send_and_sync<T: Send + Sync>() -> bool {
         true
     }
