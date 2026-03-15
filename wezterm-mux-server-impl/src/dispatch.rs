@@ -172,12 +172,17 @@ where
                     .await?;
                 stream.flush().await.context("flushing PDU to client")?;
             }
-            Ok(Item::Notif(MuxNotification::TabResized(_tab_id))) => {
-                // Don't forward TabResized to clients. The client already
-                // knows the sizes because it initiated the resize. Forwarding
-                // this creates a feedback loop: client resizes → server
-                // notifies → client resyncs → resync triggers resize → repeat.
-                // Topology changes (new tabs) use TabAddedToWindow instead.
+            Ok(Item::Notif(MuxNotification::TabResized(tab_id))) => {
+                // Suppress TabResized if this session recently processed a
+                // resize for this tab (it's our own echo). Forward it if
+                // another session caused it (multi-client support).
+                let dominated_by_self = handler.recent_resize_tab(tab_id);
+                if !dominated_by_self {
+                    Pdu::TabResized(codec::TabResized { tab_id })
+                        .encode_async(&mut stream, 0)
+                        .await?;
+                    stream.flush().await.context("flushing PDU to client")?;
+                }
             }
             Ok(Item::Notif(MuxNotification::TabTitleChanged { tab_id, title })) => {
                 Pdu::TabTitleChanged(codec::TabTitleChanged { tab_id, title })

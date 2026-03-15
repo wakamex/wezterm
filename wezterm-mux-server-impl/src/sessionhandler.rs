@@ -201,6 +201,10 @@ pub struct SessionHandler {
     per_pane: HashMap<TabId, Arc<Mutex<PerPane>>>,
     client_id: Option<Arc<ClientId>>,
     proxy_client_id: Option<ClientId>,
+    /// Tracks which tabs this session recently resized, to suppress
+    /// self-echo TabResized notifications while forwarding those
+    /// from other sessions (multi-client support).
+    recent_resizes: HashMap<TabId, std::time::Instant>,
 }
 
 impl Drop for SessionHandler {
@@ -219,7 +223,25 @@ impl SessionHandler {
             per_pane: HashMap::new(),
             client_id: None,
             proxy_client_id: None,
+            recent_resizes: HashMap::new(),
         }
+    }
+
+    /// Record that this session just processed a resize for a tab.
+    pub fn note_resize_tab(&mut self, tab_id: TabId) {
+        self.recent_resizes.insert(tab_id, std::time::Instant::now());
+    }
+
+    /// Check if this session recently resized the given tab (within 2 seconds).
+    /// Used to suppress self-echo TabResized notifications.
+    pub fn recent_resize_tab(&mut self, tab_id: TabId) -> bool {
+        if let Some(when) = self.recent_resizes.get(&tab_id) {
+            if when.elapsed() < std::time::Duration::from_secs(2) {
+                return true;
+            }
+            self.recent_resizes.remove(&tab_id);
+        }
+        false
     }
 
     pub(crate) fn per_pane(&mut self, pane_id: PaneId) -> Arc<Mutex<PerPane>> {
@@ -635,6 +657,7 @@ impl SessionHandler {
                 pane_id,
                 size,
             }) => {
+                self.note_resize_tab(containing_tab_id);
                 spawn_into_main_thread(async move {
                     catch(
                         move || {
@@ -656,6 +679,7 @@ impl SessionHandler {
             }
 
             Pdu::ResizeTab(ResizeTab { tab_id, pane_sizes }) => {
+                self.note_resize_tab(tab_id);
                 spawn_into_main_thread(async move {
                     catch(
                         move || {
