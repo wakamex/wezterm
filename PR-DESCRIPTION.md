@@ -50,13 +50,21 @@ Called from both `rebuild_splits_sizes_from_contained_panes()` (mux server path)
 | `all_layouts_resize_preserves_invariants` | Regression: L, T, deep nested, grid all survive resize cycles |
 | `pane_removal_preserves_invariants` | Regression: removing panes from L, T, grid preserves invariants |
 | `split_then_resize_preserves_invariants` | Regression: adding splits to nested layout then resizing is correct |
+| `extreme_shrink_and_grow` | No infinite loop: shrink L/T/grid to near-minimum, grow back (#4878) |
 
-Without the fix: 6 tests fail. With the fix: all 13 pass.
+Without the fix: 6 tests fail + 1 hangs. With the fix: all 14 pass.
+
+## Additional fix: infinite loop on extreme shrink (#4878)
+
+`adjust_y_size` and `adjust_x_size` can infinite-loop when shrinking a split below minimum size. When both children reach 1 row/col and `y_adjust`/`x_adjust` is still negative, neither branch makes progress and the `while` loop runs forever.
+
+Fix: track whether each iteration made progress. If neither child was shrunk, return early.
 
 ## Test plan
 
-- [x] `cargo test -p mux --lib tab::test` — 13 tests pass
+- [x] `cargo test -p mux --lib tab::test` — 14 tests pass
 - [x] Verified 6 tests fail without fix, proving they exercise the bug
+- [x] Verified extreme shrink test hangs without the infinite loop fix
 - [x] `debug_assert_tree_invariants` active in debug builds catches violations at source
 - [ ] Build fix branch and verify live violations drop to zero via `track-pane-sizes.py`
 - [ ] Manual: resize window rapidly with nested splits, confirm no visual overflow

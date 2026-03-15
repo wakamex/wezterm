@@ -71,27 +71,33 @@ The core bug is architectural: per-pane resize PDUs are fire-and-forget async ta
 **Test:** `interleaved_pdus_break_pane_size_invariant`, `reconcile_fixes_interleaved_pdu_overflow`
 **Fix:** `reconcile_tree_sizes()` in `rebuild_splits_sizes_from_contained_panes()`
 
-### Pattern 2: Column width inconsistency (detected, not yet tested)
+### Pattern 2: Column width inconsistency (confirmed, tested, fixed)
 
-**Trigger:** Unknown — observed in live session (tab 0: pane 1 width=134, pane 8 width=133).
-**Mechanism:** Likely same interleaving cause, but affecting cols instead of rows.
-**Symptom:** Panes in the same vertical column have different widths.
-**Test:** Needed.
-**Fix:** Likely covered by `reconcile_tree_sizes()` (enforces `first.cols == second.cols` for vertical splits).
+**Trigger:** Interleaved PDUs with different col counts across resize events.
+**Symptom:** Panes in the same vertical column have different widths (e.g., tab 0: pane 1=134, pane 8=133).
+**Test:** `interleaved_pdus_break_column_width`
+**Fix:** `reconcile_tree_sizes()` enforces `first.cols == second.cols` for vertical splits.
 
-### Pattern 3: Multi-level nesting overflow (detected, not yet tested)
+### Pattern 3: Multi-level nesting overflow (confirmed, tested, fixed)
 
-**Trigger:** 3+ level nesting (e.g., tab 31: 4 panes at col 145 with different widths AND height underflow of 14).
-**Mechanism:** Reconciliation may not propagate correctly through deeply nested trees.
-**Test:** Needed — extend `make_l_shaped_tab` to create 4-pane layouts.
-**Fix:** `reconcile_tree_sizes()` recurses, so it should handle this, but needs verification.
+**Trigger:** 3+ level nesting with interleaved PDUs (e.g., tab 31: 4 panes, height underflow -14).
+**Test:** `deep_nested_interleaved_pdus`
+**Fix:** `reconcile_tree_sizes()` recurses through all levels.
 
-### Pattern 4: Cross-nesting inconsistency (detected, not yet tested)
+### Pattern 4: T-shaped / cross-nesting (confirmed, tested, fixed)
 
-**Trigger:** Tab 22 "application": pane at col 0 has width 124, but another pane at col 0 has width 247 (a vertical sub-split where the bottom pane spans both columns).
-**Mechanism:** Top-level vertical split with a horizontal sub-split — the flat monitor can't distinguish this from a violation.
-**Test:** Needed — may be a false positive in the monitor, or a real layout that `reconcile_tree_sizes` handles correctly.
-**Fix:** Possibly just a monitor improvement, not a code bug.
+**Trigger:** V-split with H-sub-split on top, interleaving within the H-sub-split.
+**Symptom:** H-split children have different row counts (tab 22: bottom pane width 247 vs top 124 — real V-split overflow of -2).
+**Test:** `t_shaped_interleaved_pdus`
+**Fix:** `reconcile_tree_sizes()` enforces `first.rows == second.rows` for H-splits.
+
+### Pattern 5: Infinite loop on extreme shrink (confirmed, tested, fixed)
+
+**Trigger:** Resize window to near-minimum with nested splits.
+**Mechanism:** `adjust_y_size`/`adjust_x_size` shrink loop runs forever when both children reach 1 row/col.
+**Test:** `extreme_shrink_and_grow`
+**Fix:** Track progress per iteration; return early when neither child can shrink.
+**Issue:** #4878
 
 ---
 
