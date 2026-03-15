@@ -240,7 +240,7 @@ impl ClientPane {
         Ok(())
     }
 
-    pub fn remote_pane_id(&self) -> TabId {
+    pub fn remote_pane_id(&self) -> PaneId {
         self.remote_pane_id
     }
 
@@ -254,6 +254,19 @@ impl ClientPane {
     pub fn ignore_next_kill(&self) {
         *self.ignore_next_kill.lock() = true;
     }
+}
+
+fn translate_resize_batch<F>(
+    pane_sizes: Vec<(PaneId, TerminalSize)>,
+    mut resolve_remote_pane_id: F,
+) -> Vec<(PaneId, TerminalSize)>
+where
+    F: FnMut(PaneId) -> Option<PaneId>,
+{
+    pane_sizes
+        .into_iter()
+        .map(|(pane_id, size)| (resolve_remote_pane_id(pane_id).unwrap_or(pane_id), size))
+        .collect()
 }
 
 fn format_resize_batch(pane_sizes: &[(PaneId, TerminalSize)]) -> String {
@@ -445,6 +458,11 @@ impl Pane for ClientPane {
     ) {
         let client = Arc::clone(&self.client);
         let tab_id = self.remote_tab_id;
+        let pane_sizes = translate_resize_batch(pane_sizes, |local_pane_id| {
+            Mux::try_get()
+                .and_then(|mux| mux.get_pane(local_pane_id))
+                .and_then(|pane| pane.downcast_ref::<ClientPane>().map(|pane| pane.remote_pane_id()))
+        });
         let trace = mux::tab::size_trace_enabled().then(|| format_resize_batch(&pane_sizes));
         promise::spawn::spawn(async move {
             if let Some(summary) = trace {
@@ -715,5 +733,44 @@ impl std::io::Write for PaneWriter {
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::translate_resize_batch;
+    use mux::pane::PaneId;
+    use wezterm_term::TerminalSize;
+
+    fn size(cols: usize, rows: usize) -> TerminalSize {
+        TerminalSize {
+            cols,
+            rows,
+            pixel_width: cols * 12,
+            pixel_height: rows * 24,
+            dpi: 144,
+        }
+    }
+
+    #[test]
+    fn resize_batch_uses_remote_pane_ids() {
+        let translated = translate_resize_batch(vec![(10, size(250, 68)), (11, size(124, 68))], |pane_id| {
+            match pane_id {
+                10 => Some(101 as PaneId),
+                11 => Some(202 as PaneId),
+                _ => None,
+            }
+        });
+
+        assert_eq!(
+            translated,
+            vec![(101, size(250, 68)), (202, size(124, 68))]
+        );
+    }
+
+    #[test]
+    fn resize_batch_falls_back_to_local_id_when_unmapped() {
+        let translated = translate_resize_batch(vec![(10, size(80, 24))], |_| None);
+        assert_eq!(translated, vec![(10, size(80, 24))]);
     }
 }
