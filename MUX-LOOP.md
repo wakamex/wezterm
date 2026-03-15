@@ -222,6 +222,6 @@ main must leave all tests passing (`cargo test -p mux -p codec`).
 
 - If a bug is reproducible → write the fix+test, commit.
 - If a bug is not reproducible but the code is clearly wrong → fix it defensively, explain in commit message.
-- If a bug requires protocol changes → commit on main, bump codec version in the same commit.
+- If a bug requires protocol changes → commit on main, bump codec version. We're on a fork so codec bumps are free — don't defer protocol fixes.
 - If investigation is inconclusive after 30 minutes → document findings, move to next hypothesis.
 - If two bugs share a root cause → fix the root cause, test both symptoms.

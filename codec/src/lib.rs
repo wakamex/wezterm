@@ -525,6 +525,7 @@ pdu! {
     GetPaneDirectionResponse: 61,
     AdjustPaneSize: 62,
     ResizeTab: 63,
+    RotatePanes: 64,
 }
 
 impl Pdu {
@@ -905,6 +906,12 @@ pub struct AdjustPaneSize {
     pub pane_id: PaneId,
     pub direction: PaneDirection,
     pub amount: usize,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct RotatePanes {
+    pub tab_id: TabId,
+    pub clockwise: bool,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]

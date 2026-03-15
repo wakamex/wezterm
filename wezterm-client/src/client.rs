@@ -1353,6 +1353,7 @@ impl Client {
     rpc!(mouse_event, SendMouseEvent, UnitResponse);
     rpc!(resize, Resize, UnitResponse);
     rpc!(resize_tab, ResizeTab, UnitResponse);
+    rpc!(rotate_panes, RotatePanes, UnitResponse);
     rpc!(set_zoomed, SetPaneZoomed, UnitResponse);
     rpc!(activate_pane_direction, ActivatePaneDirection, UnitResponse);
     rpc!(

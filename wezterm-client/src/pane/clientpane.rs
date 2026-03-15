@@ -448,6 +448,18 @@ impl Pane for ClientPane {
         .detach();
     }
 
+    fn send_rotate_panes(&self, _tab_id: mux::tab::TabId, clockwise: bool) {
+        let client = Arc::clone(&self.client);
+        let tab_id = self.remote_tab_id;
+        promise::spawn::spawn(async move {
+            client
+                .client
+                .rotate_panes(RotatePanes { tab_id, clockwise })
+                .await
+        })
+        .detach();
+    }
+
     async fn search(
         &self,
         pattern: Pattern,

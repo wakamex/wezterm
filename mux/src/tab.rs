@@ -1082,8 +1082,6 @@ impl TabInner {
     fn rotate_counter_clockwise(&mut self) {
         let panes = self.iter_panes_ignoring_zoom();
         if panes.is_empty() {
-            // Shouldn't happen, but we check for this here so that the
-            // expect below cannot trigger a panic
             return;
         }
         let mut pane_to_swap = panes
@@ -1108,13 +1106,15 @@ impl TabInner {
                 }
             }
         }
+        // Notify the server so its tree stays in sync (#6397)
+        if let Some(pane) = self.get_active_pane() {
+            pane.send_rotate_panes(self.id, false);
+        }
     }
 
     fn rotate_clockwise(&mut self) {
         let panes = self.iter_panes_ignoring_zoom();
         if panes.is_empty() {
-            // Shouldn't happen, but we check for this here so that the
-            // expect below cannot trigger a panic
             return;
         }
         let mut pane_to_swap = panes
@@ -1138,6 +1138,10 @@ impl TabInner {
                     break;
                 }
             }
+        }
+        // Notify the server so its tree stays in sync (#6397)
+        if let Some(pane) = self.get_active_pane() {
+            pane.send_rotate_panes(self.id, true);
         }
         Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
     }

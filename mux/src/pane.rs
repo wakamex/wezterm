@@ -249,6 +249,9 @@ pub trait Pane: Downcast + Send + Sync {
         _pane_sizes: Vec<(PaneId, TerminalSize)>,
     ) {
     }
+    /// Notify the server that panes in the tab were rotated.
+    /// Default is no-op (local panes don't need this).
+    fn send_rotate_panes(&self, _tab_id: TabId, _clockwise: bool) {}
     /// Called as a hint that the pane is being resized as part of
     /// a zoom-to-fill-all-the-tab-space operation.
     fn set_zoomed(&self, _zoomed: bool) {}

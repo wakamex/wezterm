@@ -1010,6 +1010,27 @@ impl SessionHandler {
                 .detach();
             }
 
+            Pdu::RotatePanes(RotatePanes { tab_id, clockwise }) => {
+                spawn_into_main_thread(async move {
+                    catch(
+                        move || {
+                            let mux = Mux::get();
+                            let tab = mux
+                                .get_tab(tab_id)
+                                .ok_or_else(|| anyhow!("no such tab {}", tab_id))?;
+                            if clockwise {
+                                tab.rotate_clockwise();
+                            } else {
+                                tab.rotate_counter_clockwise();
+                            }
+                            Ok(Pdu::UnitResponse(UnitResponse {}))
+                        },
+                        send_response,
+                    )
+                })
+                .detach();
+            }
+
             Pdu::Invalid { .. } => send_response(Err(anyhow!("invalid PDU {:?}", decoded.pdu))),
             Pdu::Pong { .. }
             | Pdu::ListPanesResponse { .. }
