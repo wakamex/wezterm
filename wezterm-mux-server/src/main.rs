@@ -7,12 +7,17 @@ use portable_pty::cmdbuilder::CommandBuilder;
 use std::ffi::OsString;
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 use wezterm_gui_subcommands::*;
 use wezterm_mux_server_impl::update_mux_domains_for_server;
 
 mod daemonize;
+
+lazy_static::lazy_static! {
+    static ref SHUTDOWN_FLAG: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -235,6 +240,32 @@ fn run() -> anyhow::Result<()> {
         e
     })?;
 
+    // Set up signal handler to save session before exit
+    #[cfg(unix)]
+    {
+        let _ = signal_hook::flag::register(
+            signal_hook::consts::SIGTERM,
+            Arc::clone(&SHUTDOWN_FLAG),
+        );
+        let _ = signal_hook::flag::register(
+            signal_hook::consts::SIGINT,
+            Arc::clone(&SHUTDOWN_FLAG),
+        );
+    }
+
+    // Periodic session auto-save (every 60 seconds)
+    thread::spawn(|| {
+        loop {
+            thread::sleep(std::time::Duration::from_secs(60));
+            if SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            if let Err(err) = mux::session_persistence::save_session() {
+                log::debug!("auto-save session: {:#}", err);
+            }
+        }
+    });
+
     let activity = Activity::new();
 
     promise::spawn::spawn(async move {
@@ -246,8 +277,16 @@ fn run() -> anyhow::Result<()> {
     .detach();
 
     loop {
+        if SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
+            log::info!("Shutdown signal received, saving session...");
+            if let Err(err) = mux::session_persistence::save_session() {
+                log::error!("Failed to save session on shutdown: {:#}", err);
+            }
+            break;
+        }
         executor.tick()?;
     }
+    Ok(())
 }
 
 async fn trigger_mux_startup(lua: Option<Rc<mlua::Lua>>) -> anyhow::Result<()> {

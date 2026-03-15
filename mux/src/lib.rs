@@ -40,6 +40,7 @@ pub mod domain;
 pub mod localpane;
 pub mod pane;
 pub mod renderable;
+pub mod session_persistence;
 pub mod ssh;
 pub mod ssh_agent;
 pub mod tab;

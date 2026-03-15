@@ -25,6 +25,9 @@ umask.workspace = true
 wezterm-blob-leases = {workspace=true, features=["simple_tempdir"]}
 wezterm-mux-server-impl.workspace = true
 wezterm-gui-subcommands.workspace = true
+lazy_static.workspace = true
+signal-hook.workspace = true
+serde_json.workspace = true
 wezterm-term.workspace = true
 
 [target."cfg(windows)".dependencies]
