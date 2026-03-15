@@ -51,6 +51,9 @@ struct TabInner {
     active: usize,
     zoomed: Option<Arc<dyn Pane>>,
     title: String,
+    /// When true, the user has explicitly set the tab title and
+    /// terminal escape sequences (OSC) should not override it.
+    title_is_user_set: bool,
     recency: Recency,
 }
 
@@ -656,8 +659,29 @@ impl Tab {
         self.inner.lock().title.clone()
     }
 
+    /// Set the tab title explicitly (user action or API).
+    /// Marks the title as user-set so terminal escape sequences won't override it.
     pub fn set_title(&self, title: &str) {
         let mut inner = self.inner.lock();
+        inner.title_is_user_set = true;
+        if inner.title != title {
+            inner.title = title.to_string();
+            Mux::try_get().map(|mux| {
+                mux.notify(MuxNotification::TabTitleChanged {
+                    tab_id: inner.id,
+                    title: title.to_string(),
+                })
+            });
+        }
+    }
+
+    /// Set the tab title from a terminal escape sequence (OSC).
+    /// Ignored if the user has explicitly set a title.
+    pub fn set_title_from_terminal(&self, title: &str) {
+        let mut inner = self.inner.lock();
+        if inner.title_is_user_set {
+            return;
+        }
         if inner.title != title {
             inner.title = title.to_string();
             Mux::try_get().map(|mux| {
@@ -911,6 +935,7 @@ impl TabInner {
             active: 0,
             zoomed: None,
             title: String::new(),
+            title_is_user_set: false,
             recency: Recency::default(),
         }
     }

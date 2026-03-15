@@ -938,7 +938,9 @@ impl AlertHandler for LocalPaneNotifHandler {
                 Alert::TabTitleChanged(title) => {
                     if let Some((_domain, _window_id, tab_id)) = mux.resolve_pane_id(pane_id) {
                         if let Some(tab) = mux.get_tab(tab_id) {
-                            tab.set_title(title.as_deref().unwrap_or(""));
+                            // Use set_title_from_terminal so user-set titles
+                            // are not overwritten by OSC escape sequences
+                            tab.set_title_from_terminal(title.as_deref().unwrap_or(""));
                         }
                     }
                 }
