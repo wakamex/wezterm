@@ -57,8 +57,25 @@ def get_show_keys(binary="target/release/wezterm"):
 
 
 def get_upstream_show_keys():
-    """Try to get upstream bindings from the old binary or source."""
-    # Try the system-installed wezterm
+    """Get upstream bindings for comparison.
+
+    Priority:
+    1. upstream-show-keys.txt snapshot (always reproducible)
+    2. System-installed wezterm binary (may be our fork after deploy)
+    """
+    # 1. Snapshot file
+    try:
+        with open("upstream-show-keys.txt") as f:
+            content = f.read()
+        # Last line is the version
+        lines = content.rstrip().split("\n")
+        version = lines[-1] if lines[-1].startswith("wezterm") else "unknown"
+        output = "\n".join(lines[:-1]) if version != "unknown" else content
+        return output, version
+    except FileNotFoundError:
+        pass
+
+    # 2. System binary (fallback, may not be upstream after deploy)
     for binary in ["/usr/bin/wezterm", "wezterm"]:
         try:
             output = subprocess.check_output(
