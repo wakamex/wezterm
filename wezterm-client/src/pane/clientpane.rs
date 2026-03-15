@@ -19,6 +19,7 @@ use rangeset::RangeSet;
 use ratelim::RateLimiter;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
 use termwiz::input::KeyEvent;
@@ -255,6 +256,25 @@ impl ClientPane {
     }
 }
 
+fn format_resize_batch(pane_sizes: &[(PaneId, TerminalSize)]) -> String {
+    let mut summary = String::new();
+    for (idx, (pane_id, size)) in pane_sizes.iter().enumerate() {
+        if idx > 0 {
+            summary.push_str(", ");
+        }
+        let _ = write!(
+            summary,
+            "{}:{}x{} px={}x{}",
+            pane_id,
+            size.cols,
+            size.rows,
+            size.pixel_width,
+            size.pixel_height
+        );
+    }
+    summary
+}
+
 #[async_trait(?Send)]
 impl Pane for ClientPane {
     fn pane_id(&self) -> PaneId {
@@ -425,7 +445,15 @@ impl Pane for ClientPane {
     ) {
         let client = Arc::clone(&self.client);
         let tab_id = self.remote_tab_id;
+        let trace = mux::tab::size_trace_enabled().then(|| format_resize_batch(&pane_sizes));
         promise::spawn::spawn(async move {
+            if let Some(summary) = trace {
+                log::warn!(
+                    "size-trace client.resize_tab.send remote_tab_id={} pane_sizes=[{}]",
+                    tab_id,
+                    summary
+                );
+            }
             client
                 .client
                 .resize_tab(ResizeTab {

@@ -690,6 +690,33 @@ impl SessionHandler {
                     catch(
                         move || {
                             let mux = Mux::get();
+                            if mux::tab::size_trace_enabled() {
+                                let before = mux
+                                    .get_tab(tab_id)
+                                    .map(|tab| tab.debug_size_snapshot())
+                                    .unwrap_or_else(|| format!("tab_id={} missing", tab_id));
+                                let summary = pane_sizes
+                                    .iter()
+                                    .map(|(pane_id, size)| {
+                                        format!(
+                                            "{}:{}x{} px={}x{}",
+                                            pane_id,
+                                            size.cols,
+                                            size.rows,
+                                            size.pixel_width,
+                                            size.pixel_height
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                log::warn!(
+                                    "size-trace server.resize_tab.recv tab_id={} pane_sizes=[{}] {}",
+                                    tab_id,
+                                    summary,
+                                    before
+                                );
+                            }
+
                             // Apply all pane sizes atomically, then rebuild once
                             for (pane_id, size) in &pane_sizes {
                                 if let Some(pane) = mux.get_pane(*pane_id) {
@@ -700,6 +727,13 @@ impl SessionHandler {
                                 .get_tab(tab_id)
                                 .ok_or_else(|| anyhow!("no such tab {}", tab_id))?;
                             tab.rebuild_splits_sizes_from_contained_panes();
+                            if mux::tab::size_trace_enabled() {
+                                log::warn!(
+                                    "size-trace server.resize_tab.done tab_id={} {}",
+                                    tab_id,
+                                    tab.debug_size_snapshot()
+                                );
+                            }
                             Ok(Pdu::UnitResponse(UnitResponse {}))
                         },
                         send_response,
@@ -1133,7 +1167,24 @@ async fn split_pane(split: SplitPane, client_id: Option<Arc<ClientId>>) -> anyho
     // before the client's resize PDU has been processed.
     if let Some(tab_size) = split.tab_size {
         if let Some(tab) = mux.get_tab(tab_id) {
+            if mux::tab::size_trace_enabled() {
+                log::warn!(
+                    "size-trace server.split.tab_size.begin pane_id={} tab_id={} requested_tab_size={:?} {}",
+                    split.pane_id,
+                    tab_id,
+                    tab_size,
+                    tab.debug_size_snapshot()
+                );
+            }
             tab.resize(tab_size);
+            if mux::tab::size_trace_enabled() {
+                log::warn!(
+                    "size-trace server.split.tab_size.end pane_id={} tab_id={} {}",
+                    split.pane_id,
+                    tab_id,
+                    tab.debug_size_snapshot()
+                );
+            }
         }
     }
 
