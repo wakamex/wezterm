@@ -25,6 +25,7 @@ pub struct SavedTab {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedWindow {
     pub workspace: String,
+    pub active_tab_index: usize,
     pub tabs: Vec<SavedTab>,
 }
 
@@ -35,7 +36,7 @@ pub struct SavedSession {
     pub windows: Vec<SavedWindow>,
 }
 
-const SESSION_VERSION: u32 = 1;
+const SESSION_VERSION: u32 = 2;
 
 fn session_path() -> PathBuf {
     config::RUNTIME_DIR.join("session.json")
@@ -80,6 +81,7 @@ pub fn save_session() -> anyhow::Result<PathBuf> {
     for window_id in mux.iter_windows() {
         if let Some(window) = mux.get_window(window_id) {
             let workspace = window.get_workspace().to_string();
+            let active_tab_index = window.get_active_idx();
             let mut tabs = Vec::new();
             for tab in window.iter() {
                 let title = tab.get_title();
@@ -90,7 +92,11 @@ pub fn save_session() -> anyhow::Result<PathBuf> {
                 tabs.push(SavedTab { title, tree });
             }
             if !tabs.is_empty() {
-                windows.push(SavedWindow { workspace, tabs });
+                windows.push(SavedWindow {
+                    workspace,
+                    active_tab_index,
+                    tabs,
+                });
             }
         }
     }
@@ -182,11 +188,13 @@ pub async fn restore_session(
         let workspace = Some(saved_window.workspace.clone());
         let position = None;
         let window_id = mux.new_empty_window(workspace, position);
+        let mut restored_tabs = 0usize;
 
         for saved_tab in &saved_window.tabs {
             match restore_tab(domain, &saved_tab, default_size, *window_id).await {
                 Ok(()) => {
                     total_tabs += 1;
+                    restored_tabs += 1;
                 }
                 Err(err) => {
                     log::error!(
@@ -195,6 +203,15 @@ pub async fn restore_session(
                         err
                     );
                 }
+            }
+        }
+
+        if restored_tabs > 0 {
+            let active_tab_index = saved_window
+                .active_tab_index
+                .min(restored_tabs.saturating_sub(1));
+            if let Some(mut window) = mux.get_window_mut(*window_id) {
+                window.set_active_without_saving(active_tab_index);
             }
         }
     }

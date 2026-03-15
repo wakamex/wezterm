@@ -19,8 +19,11 @@ All changes relative to upstream `wezterm/wezterm` main at `05343b387`.
 - **Add `check-pane-layout.py` live layout validator**
   Validates `wezterm cli list --format json` output against a legal split tree so offscreen panes, overlaps, gaps, and degenerate rectangles are easy to catch from a live session.
 
+- **Preserve active tab selection in manual and automatic restore**
+  `ListPanesResponse` now carries the active tab per window, `wezterm cli save-layout` records it, manual restore focuses the saved tab after rebuilding the window, client attach/resync tracks it, and built-in mux session restore reapplies the saved active tab.
+
 - **Add Rust `wezterm cli save-layout` / `restore-layout` and remove `wez-tabs`**
-  Manual layout snapshots now use the real mux pane tree instead of reconstructing split order from flat pane rectangles. Restore replays exact split cells, preserves tab/window grouping, titles, workspaces, per-tab active pane selection, and zoom state.
+  Manual layout snapshots now use the real mux pane tree instead of reconstructing split order from flat pane rectangles. Restore replays exact split cells, preserves tab/window grouping, titles, workspaces, active tab selection, per-tab active pane selection, and zoom state.
 
 - **Fix nested split pane sizes diverging after window resize** ([de54b07](https://github.com/wakamex/wezterm/commit/de54b07d2))
   Per-pane `Pdu::Resize` messages interleave during rapid resizing, causing the mux server's tree to diverge. Added `reconcile_tree_sizes()` — a top-down constraint enforcement pass after every tree mutation. 14 unit tests covering 6 layout patterns.
@@ -69,7 +72,7 @@ All changes relative to upstream `wezterm/wezterm` main at `05343b387`.
 
 ## Codec Version
 
-Bumped from 46 to 47 for the spawn sizing protocol changes.
+Bumped from 47 to 48 for the active-tab metadata in `ListPanesResponse`.
 
 ## Test Coverage
 

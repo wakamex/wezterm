@@ -579,6 +579,8 @@ impl ClientDomain {
             .copied()
             .collect();
 
+        let active_tabs = panes.active_tabs.clone();
+
         for (tabroot, tab_title) in panes.tabs.into_iter().zip(panes.tab_titles.iter()) {
             let root_size = match tabroot.root_size() {
                 Some(size) => size,
@@ -718,6 +720,22 @@ impl ClientDomain {
                     .expect("no such window!?");
                 window.set_title(&window_title);
             }
+        }
+
+        for (remote_window_id, remote_tab_id) in active_tabs {
+            let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) else {
+                continue;
+            };
+            let Some(local_tab_id) = inner.remote_to_local_tab_id(remote_tab_id) else {
+                continue;
+            };
+            let Some(mut window) = mux.get_window_mut(local_window_id) else {
+                continue;
+            };
+            let Some(tab_idx) = window.idx_by_id(local_tab_id) else {
+                continue;
+            };
+            window.save_and_then_set_active(tab_idx);
         }
 
         // "Sweep" away our mapping for ids that are no longer present in the

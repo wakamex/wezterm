@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use wezterm_client::client::Client;
 use wezterm_term::TerminalSize;
 
-const LAYOUT_VERSION: usize = 1;
+const LAYOUT_VERSION: usize = 2;
 
 fn default_layout_path() -> PathBuf {
     config::CONFIG_DIRS
@@ -52,6 +52,7 @@ struct SavedLayout {
 struct SavedWindow {
     title: String,
     workspace: String,
+    active_tab_index: usize,
     tabs: Vec<SavedTab>,
 }
 
@@ -80,12 +81,14 @@ enum SavedPaneTree {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RestoredPaneState {
+    active_pane_id: Option<PaneId>,
     zoomed_pane_id: Option<PaneId>,
 }
 
 impl RestoredPaneState {
     fn merge(self, other: Self) -> Self {
         Self {
+            active_pane_id: self.active_pane_id.or(other.active_pane_id),
             zoomed_pane_id: self.zoomed_pane_id.or(other.zoomed_pane_id),
         }
     }
@@ -140,13 +143,14 @@ impl SavedLayout {
             tabs,
             tab_titles,
             window_titles,
+            active_tabs,
         } = response;
 
         let mut windows = Vec::new();
         let mut current_window_id: Option<WindowId> = None;
 
         for (idx, tabroot) in tabs.into_iter().enumerate() {
-            let (window_id, _tab_id) = tabroot
+            let (window_id, tab_id) = tabroot
                 .window_and_tab_ids()
                 .ok_or_else(|| anyhow!("missing window/tab id for pane tree"))?;
             let size = tabroot
@@ -166,10 +170,14 @@ impl SavedLayout {
                 windows.push(SavedWindow {
                     title: window_titles.get(&window_id).cloned().unwrap_or_default(),
                     workspace,
+                    active_tab_index: 0,
                     tabs: vec![saved_tab],
                 });
                 current_window_id = Some(window_id);
             } else if let Some(window) = windows.last_mut() {
+                if active_tabs.get(&window_id).copied() == Some(tab_id) {
+                    window.active_tab_index = window.tabs.len();
+                }
                 window.tabs.push(saved_tab);
             }
         }
@@ -246,8 +254,18 @@ impl RestoreLayout {
 
 async fn restore_window(client: &Client, window: SavedWindow) -> anyhow::Result<()> {
     let mut window_id = None;
+    let mut restored_active_window_pane_id = None;
 
-    for tab in &window.tabs {
+    if !window.tabs.is_empty() && window.active_tab_index >= window.tabs.len() {
+        anyhow::bail!(
+            "window '{}' has invalid active_tab_index {} for {} tabs",
+            window.title,
+            window.active_tab_index,
+            window.tabs.len()
+        );
+    }
+
+    for (tab_idx, tab) in window.tabs.iter().enumerate() {
         let command_dir = saved_command_dir(tab.root.first_leaf_cwd());
 
         let spawned = client
@@ -293,6 +311,18 @@ async fn restore_window(client: &Client, window: SavedWindow) -> anyhow::Result<
                 })
                 .await?;
         }
+
+        if tab_idx == window.active_tab_index {
+            restored_active_window_pane_id = restored.active_pane_id;
+        }
+    }
+
+    if let Some(active_pane_id) = restored_active_window_pane_id {
+        client
+            .set_focused_pane_id(codec::SetFocusedPane {
+                pane_id: active_pane_id,
+            })
+            .await?;
     }
 
     Ok(())
@@ -308,9 +338,11 @@ fn restore_tree<'a>(
     Box::pin(async move {
         match tree {
             SavedPaneTree::Pane {
+                is_active,
                 is_zoomed,
                 ..
             } => Ok(RestoredPaneState {
+                active_pane_id: if *is_active { Some(pane_id) } else { None },
                 zoomed_pane_id: if *is_zoomed { Some(pane_id) } else { None },
             }),
             SavedPaneTree::Split {
@@ -494,14 +526,17 @@ mod test {
                 (1, "win-a".into()),
                 (9, "win-b".into()),
             ]),
+            active_tabs: std::collections::HashMap::from([(1, 3), (9, 4)]),
         };
 
         let layout = SavedLayout::from_list_panes(response).unwrap();
         assert_eq!(layout.version, LAYOUT_VERSION);
         assert_eq!(layout.windows.len(), 2);
         assert_eq!(layout.windows[0].title, "win-a");
+        assert_eq!(layout.windows[0].active_tab_index, 1);
         assert_eq!(layout.windows[0].tabs.len(), 2);
         assert_eq!(layout.windows[1].title, "win-b");
+        assert_eq!(layout.windows[1].active_tab_index, 0);
         assert_eq!(layout.windows[1].tabs.len(), 1);
     }
 
