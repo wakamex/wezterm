@@ -438,6 +438,8 @@ impl crate::TermWindow {
                             + (line_idx + self.pos.top) as f32
                                 * self.term_window.render_metrics.cell_size.height as f32,
                         left_pixel_x: NotNan::new(self.left_pixel_x).unwrap(),
+                        pane_cols: self.dims.cols,
+                        pane_pixel_width: self.dims.pixel_width,
                         phys_line_idx: line_idx,
                         reverse_video: self.dims.reverse_video,
                     };

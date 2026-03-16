@@ -64,6 +64,8 @@ pub struct LineQuadCacheKey {
     pub shape_hash: [u8; 16],
     pub top_pixel_y: NotNan<f32>,
     pub left_pixel_x: NotNan<f32>,
+    pub pane_cols: usize,
+    pub pane_pixel_width: usize,
     pub phys_line_idx: usize,
     pub pane_id: PaneId,
     pub pane_is_active: bool,
