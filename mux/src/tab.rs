@@ -1716,6 +1716,11 @@ impl TabInner {
                 }
             }
         }
+        let mut pane_sizes = Vec::new();
+        collect_pane_sizes(self.pane.as_ref().unwrap(), &self.size, &mut pane_sizes);
+        if let Some(active_pane) = self.get_active_pane() {
+            active_pane.send_resize_batch(self.id, pane_sizes);
+        }
         Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
     }
 
@@ -2612,6 +2617,131 @@ mod test {
         }
     }
 
+    struct RecordingPane {
+        id: PaneId,
+        size: Mutex<TerminalSize>,
+        resize_batches: Mutex<Vec<(TabId, Vec<(PaneId, TerminalSize)>)>>,
+    }
+
+    impl RecordingPane {
+        fn new(id: PaneId, size: TerminalSize) -> Arc<Self> {
+            Arc::new(Self {
+                id,
+                size: Mutex::new(size),
+                resize_batches: Mutex::new(vec![]),
+            })
+        }
+    }
+
+    impl Pane for RecordingPane {
+        fn pane_id(&self) -> PaneId {
+            self.id
+        }
+
+        fn get_cursor_position(&self) -> StableCursorPosition {
+            unimplemented!();
+        }
+
+        fn get_current_seqno(&self) -> SequenceNo {
+            unimplemented!();
+        }
+
+        fn get_changed_since(
+            &self,
+            _lines: Range<StableRowIndex>,
+            _: SequenceNo,
+        ) -> RangeSet<StableRowIndex> {
+            unimplemented!();
+        }
+
+        fn with_lines_mut(
+            &self,
+            _stable_range: Range<StableRowIndex>,
+            _with_lines: &mut dyn WithPaneLines,
+        ) {
+            unimplemented!();
+        }
+
+        fn for_each_logical_line_in_stable_range_mut(
+            &self,
+            _lines: Range<StableRowIndex>,
+            _for_line: &mut dyn ForEachPaneLogicalLine,
+        ) {
+            unimplemented!();
+        }
+
+        fn get_lines(&self, _lines: Range<StableRowIndex>) -> (StableRowIndex, Vec<Line>) {
+            unimplemented!();
+        }
+
+        fn get_logical_lines(&self, _lines: Range<StableRowIndex>) -> Vec<LogicalLine> {
+            unimplemented!();
+        }
+
+        fn get_dimensions(&self) -> RenderableDimensions {
+            let size = self.size.lock();
+            RenderableDimensions {
+                cols: size.cols,
+                viewport_rows: size.rows,
+                scrollback_rows: size.rows,
+                physical_top: 0,
+                scrollback_top: 0,
+                dpi: size.dpi,
+                pixel_width: size.pixel_width,
+                pixel_height: size.pixel_height,
+                reverse_video: false,
+            }
+        }
+
+        fn get_title(&self) -> String {
+            unimplemented!()
+        }
+        fn send_paste(&self, _text: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+            Ok(None)
+        }
+        fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write> {
+            unimplemented!()
+        }
+        fn resize(&self, size: TerminalSize) -> anyhow::Result<()> {
+            *self.size.lock() = size;
+            Ok(())
+        }
+        fn send_resize_batch(&self, tab_id: TabId, pane_sizes: Vec<(PaneId, TerminalSize)>) {
+            self.resize_batches.lock().push((tab_id, pane_sizes));
+        }
+
+        fn key_down(&self, _key: KeyCode, _mods: KeyModifiers) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn key_up(&self, _: KeyCode, _: KeyModifiers) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn mouse_event(&self, _event: MouseEvent) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn is_dead(&self) -> bool {
+            false
+        }
+        fn palette(&self) -> ColorPalette {
+            unimplemented!()
+        }
+        fn domain_id(&self) -> DomainId {
+            1
+        }
+        fn is_mouse_grabbed(&self) -> bool {
+            false
+        }
+        fn is_alt_screen_active(&self) -> bool {
+            false
+        }
+        fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
+            None
+        }
+    }
+
     impl Pane for FakePane {
         fn pane_id(&self) -> PaneId {
             self.id
@@ -2917,6 +3047,59 @@ mod test {
         assert_eq!(24, panes[2].height);
         assert_eq!(400, panes[2].pixel_width);
         assert_eq!(600, panes[2].pixel_height);
+    }
+
+    #[test]
+    fn resize_split_by_sends_resize_batch() {
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 600,
+            dpi: 96,
+        };
+
+        let pane0 = RecordingPane::new(1, size);
+        let pane1 = RecordingPane::new(2, size);
+
+        let tab = Tab::new(&size);
+        tab.assign_pane(&(pane0.clone() as Arc<dyn Pane>));
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                target_is_second: true,
+                size: SplitSize::Percent(50),
+                top_level: false,
+            },
+            pane1.clone() as Arc<dyn Pane>,
+        )
+        .unwrap();
+
+        pane0.resize_batches.lock().clear();
+        pane1.resize_batches.lock().clear();
+
+        tab.resize_split_by(0, 5);
+
+        let batches = pane1.resize_batches.lock();
+        assert_eq!(batches.len(), 1, "active pane should send one resize batch");
+        let (tab_id, pane_sizes) = &batches[0];
+        assert_eq!(*tab_id, tab.tab_id());
+        assert_eq!(pane_sizes.len(), 2);
+
+        let left = pane_sizes
+            .iter()
+            .find(|(pane_id, _)| *pane_id == 1)
+            .map(|(_, size)| size.cols)
+            .unwrap();
+        let right = pane_sizes
+            .iter()
+            .find(|(pane_id, _)| *pane_id == 2)
+            .map(|(_, size)| size.cols)
+            .unwrap();
+
+        assert_eq!(left, 44);
+        assert_eq!(right, 35);
     }
 
     fn check_tree_invariants(tree: &Tree, allocated: &TerminalSize) -> Vec<String> {
