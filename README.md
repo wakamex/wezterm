@@ -10,6 +10,10 @@ This is an actively maintained fork of [wezterm/wezterm](https://github.com/wezt
 
 ### What's changed
 
+**Buildability:**
+
+- Builds again on current toolchains after fixing the missing `chrono` `clock` feature that broke `Utc::now()`
+
 **Bug fixes** — see [CHANGELOG-FORK.md](CHANGELOG-FORK.md) for details:
 
 - Nested split pane sizes diverging after window resize (#6052, #5011, #5117)
@@ -31,7 +35,8 @@ This is an actively maintained fork of [wezterm/wezterm](https://github.com/wezt
 **Window geometry** — macOS remembers window position and size across restarts via native `NSWindow` autosave
 
 **Resize stability:**
-- Batched `ResizeTab` PDU prevents per-pane interleaving
+- Atomic tab-level `ResizeTab` updates replace interleaving per-pane async resize PDUs
+- Divider drags now use the same `ResizeTab` batch path as full tab resizes, keeping local and remote split trees in sync
 - Spawn sizing now uses the live tab/window size across CLI spawn, GUI delegation, and mux server split flows
 - Server suppresses self-echo `TabResized` to break feedback loops while forwarding to other clients
 - Resync debounce queues instead of drops overlapping requests

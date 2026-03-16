@@ -6,6 +6,9 @@ All changes relative to upstream `wezterm/wezterm` main at `05343b387`.
 
 ### Resize / Split Tree
 
+- **Sync divider drags via atomic ResizeTab batches**
+  `resize_split_by()` now sends the same tab-level `ResizeTab` batch used by full window resizes, so dragging a split divider updates the mux server coherently instead of leaving client-only pane widths behind.
+
 - **Fix spawn sizing across entry points**
   `wezterm cli spawn`, delegation into an already-running GUI instance, and existing-window mux spawns now use the live tab size instead of falling back to tiny server defaults.
   Codec version bumped to 47.
