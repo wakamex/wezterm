@@ -1,12 +1,21 @@
-use crate::cli::CliOutputFormatKind;
-use anyhow::Context;
+use crate::cli::{CliOutputFormatKind, resolve_relative_cwd};
+use anyhow::{Context, bail};
 use chrono::Utc;
-use clap::{Parser, Subcommand};
-use codec::ListPanesResponse;
+use clap::{Parser, Subcommand, ValueHint};
+use codec::{ListPanesResponse, SpawnV2};
+use config::ConfigHandle;
+use config::keyassignment::SpawnTabDomain;
 use mux::agent::{AgentMetadata, AgentSnapshot};
 use mux::pane::PaneId;
+use mux::tab::{SplitDirection, SplitRequest, SplitSize, size_trace_enabled};
+use mux::window::WindowId;
+use portable_pty::cmdbuilder::CommandBuilder;
 use serde::Serialize;
-use tabout::{tabulate_output, Alignment, Column};
+use std::ffi::OsString;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
+use tabout::{Alignment, Column, tabulate_output};
 use uuid::Uuid;
 use wezterm_client::client::Client;
 
@@ -18,6 +27,9 @@ pub struct AgentCommand {
 
 #[derive(Debug, Subcommand, Clone)]
 enum AgentSubCommand {
+    #[command(name = "spawn", about = "spawn a new agent pane or tab")]
+    Spawn(SpawnAgentCommand),
+
     #[command(name = "list", about = "list agent-tagged panes")]
     List(ListAgentsCommand),
 
@@ -32,14 +44,642 @@ enum AgentSubCommand {
 }
 
 impl AgentCommand {
-    pub async fn run(&self, client: Client) -> anyhow::Result<()> {
+    pub async fn run(&self, client: Client, config: &ConfigHandle) -> anyhow::Result<()> {
         match &self.sub {
+            AgentSubCommand::Spawn(cmd) => cmd.run(client, config).await,
             AgentSubCommand::List(cmd) => cmd.run(client).await,
             AgentSubCommand::Inspect(cmd) => cmd.run(client).await,
             AgentSubCommand::Set(cmd) => cmd.run(client).await,
             AgentSubCommand::Clear(cmd) => cmd.run(client).await,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorktreeMode {
+    None,
+    Auto,
+    Path(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+struct PreparedAgentLaunch {
+    command: CommandBuilder,
+    launch_cmd: String,
+    command_dir: String,
+    repo_root: Option<String>,
+    worktree: Option<String>,
+    branch: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PaneContext {
+    window_id: WindowId,
+    tab_size: wezterm_term::TerminalSize,
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Parser, Clone)]
+pub struct SpawnAgentCommand {
+    /// Stable human-readable name for this agent
+    #[arg(long)]
+    name: String,
+
+    /// Spawn into a split instead of creating a new tab
+    #[arg(long, conflicts_with_all = &["new_window", "workspace"])]
+    split: bool,
+
+    /// Specify the current pane or split target. Defaults to WEZTERM_PANE.
+    #[arg(long)]
+    pane_id: Option<PaneId>,
+
+    /// When not splitting, create a new window instead of a new tab.
+    #[arg(long, conflicts_with = "split")]
+    new_window: bool,
+
+    /// Workspace to use when creating a new window.
+    #[arg(long, requires = "new_window")]
+    workspace: Option<String>,
+
+    /// Equivalent to `--right`.
+    #[arg(long, conflicts_with_all = &["left", "right", "top", "bottom"])]
+    horizontal: bool,
+
+    /// Split horizontally, with the new pane on the left
+    #[arg(long, conflicts_with_all = &["right", "top", "bottom"])]
+    left: bool,
+
+    /// Split horizontally, with the new pane on the right
+    #[arg(long, conflicts_with_all = &["left", "top", "bottom"])]
+    right: bool,
+
+    /// Split vertically, with the new pane on the top
+    #[arg(long, conflicts_with_all = &["left", "right", "bottom"])]
+    top: bool,
+
+    /// Split vertically, with the new pane on the bottom
+    #[arg(long, conflicts_with_all = &["left", "right", "top"])]
+    bottom: bool,
+
+    /// Number of cells for the new split
+    #[arg(long, conflicts_with = "percent")]
+    cells: Option<usize>,
+
+    /// Percentage for the new split
+    #[arg(long)]
+    percent: Option<u8>,
+
+    /// Repository root or any path inside the target repository
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    repo: Option<PathBuf>,
+
+    /// Worktree mode: `none`, `auto`, or an explicit path
+    #[arg(long, default_value = "none", value_parser = parse_worktree_mode)]
+    worktree: WorktreeMode,
+
+    /// Branch to create or checkout before launch
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Override the launch cwd directly
+    #[arg(long, value_parser, value_hint = ValueHint::DirPath)]
+    cwd: Option<OsString>,
+
+    /// Command line to launch inside the new pane
+    #[arg(long)]
+    cmd: String,
+}
+
+impl SpawnAgentCommand {
+    async fn run(&self, client: Client, config: &ConfigHandle) -> anyhow::Result<()> {
+        let snapshot = self
+            .run_with(
+                config,
+                || client.list_agents(),
+                || client.list_panes(),
+                || client.list_agents(),
+                |pane_id| client.resolve_pane_id(pane_id),
+                |request| client.spawn_v2(request),
+                |request| client.split_pane(request),
+                |request| client.set_agent_metadata(request),
+                |request| client.kill_pane(request),
+                |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+            )
+            .await?;
+        write_json(&snapshot)
+    }
+
+    async fn run_with<
+        ListAgents,
+        ListAgentsFut,
+        ListPanes,
+        ListPanesFut,
+        ListAgentsAfterSet,
+        ListAgentsAfterSetFut,
+        ResolvePaneId,
+        ResolvePaneIdFut,
+        SpawnV2Fn,
+        SpawnV2Fut,
+        SplitPaneFn,
+        SplitPaneFut,
+        SetAgentMetadataFn,
+        SetAgentMetadataFut,
+        KillPaneFn,
+        KillPaneFut,
+        PrepareLaunchFn,
+    >(
+        &self,
+        config: &ConfigHandle,
+        list_agents: ListAgents,
+        list_panes: ListPanes,
+        list_agents_after_set: ListAgentsAfterSet,
+        resolve_pane_id: ResolvePaneId,
+        spawn_v2: SpawnV2Fn,
+        split_pane: SplitPaneFn,
+        set_agent_metadata: SetAgentMetadataFn,
+        kill_pane: KillPaneFn,
+        prepare_launch: PrepareLaunchFn,
+    ) -> anyhow::Result<AgentSnapshot>
+    where
+        ListAgents: FnOnce() -> ListAgentsFut,
+        ListAgentsFut: Future<Output = anyhow::Result<codec::ListAgentsResponse>>,
+        ListPanes: FnOnce() -> ListPanesFut,
+        ListPanesFut: Future<Output = anyhow::Result<ListPanesResponse>>,
+        ListAgentsAfterSet: FnOnce() -> ListAgentsAfterSetFut,
+        ListAgentsAfterSetFut: Future<Output = anyhow::Result<codec::ListAgentsResponse>>,
+        ResolvePaneId: FnOnce(Option<PaneId>) -> ResolvePaneIdFut,
+        ResolvePaneIdFut: Future<Output = anyhow::Result<PaneId>>,
+        SpawnV2Fn: FnOnce(codec::SpawnV2) -> SpawnV2Fut,
+        SpawnV2Fut: Future<Output = anyhow::Result<codec::SpawnResponse>>,
+        SplitPaneFn: FnOnce(codec::SplitPane) -> SplitPaneFut,
+        SplitPaneFut: Future<Output = anyhow::Result<codec::SpawnResponse>>,
+        SetAgentMetadataFn: FnOnce(codec::SetAgentMetadata) -> SetAgentMetadataFut,
+        SetAgentMetadataFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
+        KillPaneFn: FnOnce(codec::KillPane) -> KillPaneFut,
+        KillPaneFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
+        PrepareLaunchFn: FnOnce(
+            &SpawnAgentCommand,
+            &[AgentSnapshot],
+            Option<String>,
+        ) -> anyhow::Result<PreparedAgentLaunch>,
+    {
+        let context_pane_id = if self.split || self.pane_id.is_some() || !self.new_window {
+            Some(resolve_pane_id(self.pane_id).await?)
+        } else {
+            None
+        };
+
+        let panes = if context_pane_id.is_some() {
+            Some(list_panes().await?)
+        } else {
+            None
+        };
+        let pane_context = context_pane_id.and_then(|pane_id| {
+            panes
+                .as_ref()
+                .and_then(|panes| find_pane_context(panes, pane_id))
+        });
+
+        let agents = list_agents().await?.agents;
+        ensure_agent_name_available(&agents, &self.name)?;
+
+        let prepared = prepare_launch(
+            self,
+            &agents,
+            pane_context
+                .as_ref()
+                .and_then(|context| context.cwd.clone()),
+        )?;
+
+        let spawned = if self.split {
+            let pane_id =
+                context_pane_id.ok_or_else(|| anyhow::anyhow!("split requires a pane"))?;
+            let tab_size = pane_context
+                .as_ref()
+                .map(|context| context.tab_size)
+                .ok_or_else(|| anyhow::anyhow!("unable to resolve split tab size"))?;
+            split_pane(codec::SplitPane {
+                pane_id,
+                split_request: self.split_request(),
+                command: Some(prepared.command.clone()),
+                command_dir: Some(prepared.command_dir.clone()),
+                domain: SpawnTabDomain::CurrentPaneDomain,
+                move_pane_id: None,
+                tab_size: Some(tab_size),
+            })
+            .await?
+        } else {
+            let window_id = if self.new_window {
+                None
+            } else {
+                Some(
+                    pane_context
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("unable to resolve current window"))?
+                        .window_id,
+                )
+            };
+            let size = pane_context
+                .as_ref()
+                .map(|context| context.tab_size)
+                .unwrap_or_else(|| config.initial_size(0, None));
+            let workspace = self.workspace.clone().unwrap_or_else(|| {
+                config
+                    .default_workspace
+                    .as_deref()
+                    .unwrap_or(mux::DEFAULT_WORKSPACE)
+                    .to_string()
+            });
+
+            if size_trace_enabled() {
+                log::warn!(
+                    "size-trace cli.agent.spawn split={} window_id={:?} pane_id={:?} new_window={} size={:?}",
+                    self.split,
+                    window_id,
+                    context_pane_id,
+                    self.new_window,
+                    size
+                );
+            }
+
+            spawn_v2(SpawnV2 {
+                domain: SpawnTabDomain::DefaultDomain,
+                window_id,
+                command: Some(prepared.command.clone()),
+                command_dir: Some(prepared.command_dir.clone()),
+                size,
+                workspace,
+            })
+            .await?
+        };
+
+        let metadata = AgentMetadata {
+            agent_id: Uuid::new_v4().to_string(),
+            name: self.name.clone(),
+            launch_cmd: prepared.launch_cmd,
+            declared_cwd: prepared.command_dir,
+            created_at: Utc::now(),
+            repo_root: prepared.repo_root,
+            worktree: prepared.worktree,
+            branch: prepared.branch,
+        };
+
+        if let Err(err) = set_agent_metadata(codec::SetAgentMetadata {
+            pane_id: spawned.pane_id,
+            metadata,
+        })
+        .await
+        {
+            let _ = kill_pane(codec::KillPane {
+                pane_id: spawned.pane_id,
+            })
+            .await;
+            return Err(err.context("spawned pane but failed to attach agent metadata"));
+        }
+
+        list_agents_after_set()
+            .await?
+            .agents
+            .into_iter()
+            .find(|agent| agent.pane_id == spawned.pane_id)
+            .ok_or_else(|| anyhow::anyhow!("spawned agent but could not reload it from the mux"))
+    }
+
+    fn split_request(&self) -> SplitRequest {
+        let direction = if self.left || self.right || self.horizontal {
+            SplitDirection::Horizontal
+        } else if self.top || self.bottom {
+            SplitDirection::Vertical
+        } else {
+            SplitDirection::Horizontal
+        };
+        let target_is_second = !(self.left || self.top);
+        let size = match (self.cells, self.percent) {
+            (Some(cells), _) => SplitSize::Cells(cells),
+            (_, Some(percent)) => SplitSize::Percent(percent),
+            (None, None) => SplitSize::Percent(50),
+        };
+
+        SplitRequest {
+            direction,
+            target_is_second,
+            size,
+            top_level: false,
+        }
+    }
+
+    fn prepare_launch(
+        &self,
+        agents: &[AgentSnapshot],
+        current_cwd: Option<String>,
+    ) -> anyhow::Result<PreparedAgentLaunch> {
+        let repo_root = self
+            .repo
+            .as_ref()
+            .map(|path| resolve_repo_root(path))
+            .transpose()?;
+        let worktree_path = match &self.worktree {
+            WorktreeMode::None => None,
+            WorktreeMode::Auto => {
+                let repo_root = repo_root
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("--worktree auto requires --repo"))?;
+                Some(auto_worktree_path(repo_root, &self.name))
+            }
+            WorktreeMode::Path(path) => Some(normalize_path(path)?),
+        };
+
+        if self.branch.is_some() && repo_root.is_none() && worktree_path.is_none() {
+            bail!("--branch requires --repo or --worktree");
+        }
+
+        if let Some(worktree_path) = worktree_path.as_ref() {
+            ensure_worktree_available(agents, worktree_path)?;
+            let repo_root = repo_root
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("--worktree requires --repo"))?;
+            ensure_worktree(repo_root, worktree_path, self.branch.as_deref())?;
+        } else if let (Some(repo_root), Some(branch)) = (repo_root.as_ref(), self.branch.as_deref())
+        {
+            ensure_branch_checkout(repo_root, branch)?;
+        }
+
+        let command_dir = resolve_relative_cwd(self.cwd.clone())?
+            .or_else(|| worktree_path.as_ref().map(|path| path_to_string(path)))
+            .or_else(|| repo_root.as_ref().map(|path| path_to_string(path)))
+            .or(current_cwd)
+            .unwrap_or(
+                std::env::current_dir()
+                    .context("resolving current directory")?
+                    .to_string_lossy()
+                    .to_string(),
+            );
+
+        Ok(PreparedAgentLaunch {
+            command: command_builder_from_cmd(&self.cmd)?,
+            launch_cmd: self.cmd.clone(),
+            command_dir,
+            repo_root: repo_root.as_ref().map(|path| path_to_string(path)),
+            worktree: worktree_path.as_ref().map(|path| path_to_string(path)),
+            branch: self.branch.clone(),
+        })
+    }
+}
+
+fn parse_worktree_mode(s: &str) -> anyhow::Result<WorktreeMode> {
+    Ok(match s {
+        "none" => WorktreeMode::None,
+        "auto" => WorktreeMode::Auto,
+        path => WorktreeMode::Path(PathBuf::from(path)),
+    })
+}
+
+fn ensure_agent_name_available(
+    agents: &[AgentSnapshot],
+    requested_name: &str,
+) -> anyhow::Result<()> {
+    if let Some(existing) = agents
+        .iter()
+        .find(|agent| agent.metadata.name == requested_name)
+    {
+        bail!(
+            "agent name {} is already assigned to pane {}",
+            requested_name,
+            existing.pane_id
+        );
+    }
+    Ok(())
+}
+
+fn find_pane_context(panes: &ListPanesResponse, pane_id: PaneId) -> Option<PaneContext> {
+    for tabroot in &panes.tabs {
+        let Some(root_size) = tabroot.root_size() else {
+            continue;
+        };
+        let mut cursor = tabroot.clone().into_tree().cursor();
+
+        loop {
+            if let Some(entry) = cursor.leaf_mut() {
+                if entry.pane_id == pane_id {
+                    return Some(PaneContext {
+                        window_id: entry.window_id,
+                        tab_size: root_size,
+                        cwd: pane_working_dir(entry.working_dir.as_ref()),
+                    });
+                }
+            }
+            match cursor.preorder_next() {
+                Ok(c) => cursor = c,
+                Err(_) => break,
+            }
+        }
+    }
+
+    None
+}
+
+fn pane_working_dir(working_dir: Option<&mux::tab::SerdeUrl>) -> Option<String> {
+    let url = &working_dir?.url;
+    if url.scheme() == "file" {
+        return url
+            .to_file_path()
+            .ok()
+            .map(|path| path.to_string_lossy().to_string());
+    }
+    Some(url.as_str().to_string())
+}
+
+fn resolve_repo_root(path: &Path) -> anyhow::Result<PathBuf> {
+    let path = normalize_path(path)?;
+    let git_dir = if path.is_file() {
+        path.parent()
+            .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?
+            .to_path_buf()
+    } else {
+        path
+    };
+
+    let mut cmd = ProcessCommand::new("git");
+    cmd.arg("-C")
+        .arg(&git_dir)
+        .args(["rev-parse", "--show-toplevel"]);
+    let stdout = capture_command_output(&mut cmd, "resolving git repository root")?;
+    normalize_path(Path::new(stdout.trim()))
+}
+
+fn auto_worktree_path(repo_root: &Path, name: &str) -> PathBuf {
+    let repo_parent = repo_root.parent().unwrap_or(repo_root);
+    let repo_name = repo_root
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| OsString::from("repo"));
+    repo_parent
+        .join(".wezterm-agents")
+        .join(repo_name)
+        .join(name)
+}
+
+fn normalize_path(path: &Path) -> anyhow::Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolving current directory")?
+            .join(path)
+    };
+
+    if path.exists() {
+        path.canonicalize()
+            .with_context(|| format!("canonicalizing {}", path.display()))
+    } else {
+        Ok(path)
+    }
+}
+
+fn ensure_worktree_available(
+    agents: &[AgentSnapshot],
+    requested_worktree: &Path,
+) -> anyhow::Result<()> {
+    let requested_worktree = normalize_path(requested_worktree)?;
+    for agent in agents {
+        let Some(existing_worktree) = agent.metadata.worktree.as_ref() else {
+            continue;
+        };
+        let existing_worktree = normalize_path(Path::new(existing_worktree))?;
+        if existing_worktree == requested_worktree {
+            bail!(
+                "worktree {} is already assigned to agent {}",
+                requested_worktree.display(),
+                agent.metadata.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ensure_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: Option<&str>,
+) -> anyhow::Result<()> {
+    let repo_root = normalize_path(repo_root)?;
+    let worktree_path = normalize_path(worktree_path)?;
+
+    let registered = git_worktree_exists(&repo_root, &worktree_path)?;
+    if worktree_path.exists() {
+        anyhow::ensure!(
+            registered,
+            "worktree path {} exists but is not registered in {}",
+            worktree_path.display(),
+            repo_root.display()
+        );
+        if let Some(branch) = branch {
+            ensure_branch_checkout(&worktree_path, branch)?;
+        }
+        return Ok(());
+    }
+
+    let parent = worktree_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "worktree path {} has no parent directory",
+            worktree_path.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+
+    let mut cmd = ProcessCommand::new("git");
+    cmd.arg("-C").arg(&repo_root).arg("worktree").arg("add");
+    if let Some(branch) = branch {
+        if git_local_branch_exists(&repo_root, branch)? {
+            cmd.arg(&worktree_path).arg(branch);
+        } else {
+            cmd.arg("-b").arg(branch).arg(&worktree_path);
+        }
+    } else {
+        cmd.arg("--detach").arg(&worktree_path);
+    }
+    capture_command_output(&mut cmd, "creating git worktree")?;
+
+    anyhow::ensure!(
+        git_worktree_exists(&repo_root, &worktree_path)?,
+        "git created {} but did not register it as a worktree",
+        worktree_path.display()
+    );
+    Ok(())
+}
+
+fn ensure_branch_checkout(repo_or_worktree: &Path, branch: &str) -> anyhow::Result<()> {
+    let repo_or_worktree = normalize_path(repo_or_worktree)?;
+    let branch_exists = git_local_branch_exists(&repo_or_worktree, branch)?;
+
+    let mut cmd = ProcessCommand::new("git");
+    cmd.arg("-C").arg(&repo_or_worktree).arg("checkout");
+    if branch_exists {
+        cmd.arg(branch);
+    } else {
+        cmd.arg("-b").arg(branch);
+    }
+    capture_command_output(&mut cmd, "checking out git branch")?;
+    Ok(())
+}
+
+fn git_local_branch_exists(repo_or_worktree: &Path, branch: &str) -> anyhow::Result<bool> {
+    let status = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo_or_worktree)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .status()
+        .with_context(|| format!("checking whether git branch {branch} exists"))?;
+    Ok(status.success())
+}
+
+fn git_worktree_exists(repo_root: &Path, worktree_path: &Path) -> anyhow::Result<bool> {
+    let mut cmd = ProcessCommand::new("git");
+    cmd.arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "list", "--porcelain"]);
+    let stdout = capture_command_output(&mut cmd, "listing git worktrees")?;
+    let requested = normalize_path(worktree_path)?;
+
+    for line in stdout.lines() {
+        let Some(path) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        if normalize_path(Path::new(path))? == requested {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn capture_command_output(cmd: &mut ProcessCommand, description: &str) -> anyhow::Result<String> {
+    let output = cmd
+        .output()
+        .with_context(|| format!("running {description}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        bail!("{description} failed: {detail}");
+    }
+
+    String::from_utf8(output.stdout)
+        .map(|stdout| stdout.trim().to_string())
+        .context("command output was not valid utf-8")
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn command_builder_from_cmd(cmd: &str) -> anyhow::Result<CommandBuilder> {
+    let argv = shell_words::split(cmd).context("parsing --cmd")?;
+    anyhow::ensure!(!argv.is_empty(), "--cmd must not be empty");
+    Ok(CommandBuilder::from_argv(
+        argv.into_iter().map(OsString::from).collect(),
+    ))
 }
 
 #[derive(Debug, Parser, Clone, Copy)]
@@ -296,10 +936,7 @@ fn find_pane_cwd(panes: &ListPanesResponse, pane_id: PaneId) -> Option<String> {
         loop {
             if let Some(entry) = cursor.leaf_mut() {
                 if entry.pane_id == pane_id {
-                    return entry
-                        .working_dir
-                        .as_ref()
-                        .map(|url| url.url.as_str().to_string());
+                    return pane_working_dir(entry.working_dir.as_ref());
                 }
             }
             match cursor.preorder_next() {
@@ -316,15 +953,18 @@ fn find_pane_cwd(panes: &ListPanesResponse, pane_id: PaneId) -> Option<String> {
 mod test {
     use super::*;
     use chrono::TimeZone;
-    use codec::{ListAgentsResponse, ListPanesResponse, UnitResponse};
+    use codec::{ListAgentsResponse, ListPanesResponse, SpawnResponse, UnitResponse};
     use mux::agent::AgentMetadata;
     use mux::client::ClientWindowViewState;
     use mux::renderable::StableCursorPosition;
-    use mux::tab::{PaneEntry, PaneNode, SerdeUrl};
+    use mux::tab::{PaneEntry, PaneNode, SerdeUrl, SplitDirection, SplitDirectionAndSize};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::convert::TryFrom;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use tempfile::TempDir;
     use termwiz::surface::{CursorShape, CursorVisibility};
     use wezterm_term::TerminalSize;
 
@@ -338,7 +978,11 @@ mod test {
         }
     }
 
-    fn leaf(window_id: mux::window::WindowId, tab_id: mux::tab::TabId, pane_id: PaneId) -> PaneNode {
+    fn leaf(
+        window_id: mux::window::WindowId,
+        tab_id: mux::tab::TabId,
+        pane_id: PaneId,
+    ) -> PaneNode {
         PaneNode::Leaf(PaneEntry {
             window_id,
             tab_id,
@@ -363,12 +1007,21 @@ mod test {
         })
     }
 
+    fn split(left: PaneNode, right: PaneNode, node: SplitDirectionAndSize) -> PaneNode {
+        PaneNode::Split {
+            left: Box::new(left),
+            right: Box::new(right),
+            node,
+        }
+    }
+
     fn panes_response(panes: Vec<PaneNode>) -> ListPanesResponse {
         ListPanesResponse {
             tabs: panes,
             tab_titles: vec!["tab".to_string()],
             window_titles: HashMap::new(),
-            client_window_view_state: HashMap::<mux::window::WindowId, ClientWindowViewState>::new(),
+            client_window_view_state: HashMap::<mux::window::WindowId, ClientWindowViewState>::new(
+            ),
         }
     }
 
@@ -390,6 +1043,43 @@ mod test {
             workspace: "default".to_string(),
             domain_id: 1,
         }
+    }
+
+    fn sample_spawn_response(pane_id: PaneId, tab_id: mux::tab::TabId) -> SpawnResponse {
+        SpawnResponse {
+            pane_id,
+            tab_id,
+            window_id: 10,
+            size: size(80, 24),
+        }
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "git {:?} failed in {}",
+            args,
+            dir.display()
+        );
+    }
+
+    fn init_git_repo() -> (TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_git(&repo, &["config", "user.name", "Test User"]);
+        fs::write(repo.join("README.md"), "hello\n").unwrap();
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        (temp, repo)
     }
 
     #[test]
@@ -417,7 +1107,11 @@ mod test {
         };
         let existing = sample_agent(30, "old-name");
         promise::spawn::block_on(command.run_with(
-            || async { Ok(ListAgentsResponse { agents: vec![existing.clone()] }) },
+            || async {
+                Ok(ListAgentsResponse {
+                    agents: vec![existing.clone()],
+                })
+            },
             || async { Ok(panes_response(vec![leaf(10, 20, 30)])) },
             || async {
                 Ok(ListAgentsResponse {
@@ -445,9 +1139,272 @@ mod test {
         assert_eq!(call[0].pane_id, 30);
         assert_eq!(call[0].metadata.agent_id, existing.metadata.agent_id);
         assert_eq!(call[0].metadata.launch_cmd, existing.metadata.launch_cmd);
-        assert_eq!(call[0].metadata.declared_cwd, existing.metadata.declared_cwd);
+        assert_eq!(
+            call[0].metadata.declared_cwd,
+            existing.metadata.declared_cwd
+        );
         assert_eq!(call[0].metadata.name, "reviewer");
         assert_eq!(call[0].metadata.repo_root.as_deref(), Some("/repo"));
         assert_eq!(call[0].metadata.branch.as_deref(), Some("agent/reviewer"));
+    }
+
+    #[test]
+    fn spawn_split_inherits_tab_context_and_real_path_cwd() {
+        let split_calls = Rc::new(RefCell::new(vec![]));
+        let set_calls = Rc::new(RefCell::new(vec![]));
+        let command = SpawnAgentCommand {
+            name: "reviewer".to_string(),
+            split: true,
+            pane_id: Some(30),
+            new_window: false,
+            workspace: None,
+            horizontal: false,
+            left: false,
+            right: true,
+            top: false,
+            bottom: false,
+            cells: None,
+            percent: Some(40),
+            repo: None,
+            worktree: WorktreeMode::None,
+            branch: None,
+            cwd: None,
+            cmd: "codex --model gpt-5".to_string(),
+        };
+        let left_size = size(80, 24);
+        let right_size = size(39, 24);
+        let root_size = size(120, 24);
+
+        let agent = promise::spawn::block_on(command.run_with(
+            &ConfigHandle::default_config(),
+            || async { Ok(ListAgentsResponse { agents: vec![] }) },
+            || async {
+                Ok(panes_response(vec![split(
+                    leaf(10, 20, 30),
+                    leaf(10, 20, 31),
+                    SplitDirectionAndSize {
+                        direction: SplitDirection::Horizontal,
+                        first: left_size,
+                        second: right_size,
+                    },
+                )]))
+            },
+            || async {
+                Ok(ListAgentsResponse {
+                    agents: vec![sample_agent(44, "reviewer")],
+                })
+            },
+            |pane_id| async move { Ok(pane_id.expect("pane id")) },
+            |_| async move { panic!("spawn_v2 should not be used for split agent spawn") },
+            {
+                let split_calls = Rc::clone(&split_calls);
+                move |request| {
+                    split_calls.borrow_mut().push(request);
+                    async { Ok(sample_spawn_response(44, 20)) }
+                }
+            },
+            {
+                let set_calls = Rc::clone(&set_calls);
+                move |request| {
+                    set_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            |_| async move { panic!("kill_pane should not be called on success") },
+            |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+        ))
+        .unwrap();
+
+        assert_eq!(agent.pane_id, 44);
+
+        let split_calls = split_calls.borrow();
+        assert_eq!(split_calls.len(), 1);
+        assert_eq!(split_calls[0].pane_id, 30);
+        assert_eq!(split_calls[0].tab_size, Some(root_size));
+        assert_eq!(split_calls[0].command_dir.as_deref(), Some("/tmp/pane-30"));
+        assert_eq!(
+            split_calls[0].split_request.direction,
+            SplitDirection::Horizontal
+        );
+        assert!(split_calls[0].split_request.target_is_second);
+        assert_eq!(split_calls[0].split_request.size, SplitSize::Percent(40));
+
+        let set_calls = set_calls.borrow();
+        assert_eq!(set_calls.len(), 1);
+        assert_eq!(set_calls[0].pane_id, 44);
+        assert_eq!(set_calls[0].metadata.name, "reviewer");
+        assert_eq!(set_calls[0].metadata.declared_cwd, "/tmp/pane-30");
+        assert_eq!(set_calls[0].metadata.launch_cmd, "codex --model gpt-5");
+    }
+
+    #[test]
+    fn spawn_cleans_up_spawned_pane_when_metadata_attachment_fails() {
+        let kill_calls = Rc::new(RefCell::new(vec![]));
+        let command = SpawnAgentCommand {
+            name: "reviewer".to_string(),
+            split: false,
+            pane_id: None,
+            new_window: true,
+            workspace: Some("agents".to_string()),
+            horizontal: false,
+            left: false,
+            right: false,
+            top: false,
+            bottom: false,
+            cells: None,
+            percent: None,
+            repo: None,
+            worktree: WorktreeMode::None,
+            branch: None,
+            cwd: None,
+            cmd: "codex".to_string(),
+        };
+
+        let err = promise::spawn::block_on(command.run_with(
+            &ConfigHandle::default_config(),
+            || async { Ok(ListAgentsResponse { agents: vec![] }) },
+            || async { panic!("list_panes should not be used for new-window agent spawn") },
+            || async { panic!("list_agents_after_set should not be used on failure") },
+            |_| async { panic!("resolve_pane_id should not be called") },
+            |_| async { Ok(sample_spawn_response(77, 22)) },
+            |_| async { panic!("split_pane should not be used") },
+            |_| async { Err(anyhow::anyhow!("metadata attach failed")) },
+            {
+                let kill_calls = Rc::clone(&kill_calls);
+                move |request| {
+                    kill_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+        ))
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("spawned pane but failed to attach agent metadata")
+        );
+        let kill_calls = kill_calls.borrow();
+        assert_eq!(kill_calls.len(), 1);
+        assert_eq!(kill_calls[0].pane_id, 77);
+    }
+
+    #[test]
+    fn spawn_with_auto_worktree_creates_and_registers_worktree() {
+        let (_temp, repo_root) = init_git_repo();
+        let spawn_calls = Rc::new(RefCell::new(vec![]));
+        let set_calls = Rc::new(RefCell::new(vec![]));
+        let command = SpawnAgentCommand {
+            name: "scrape-api".to_string(),
+            split: false,
+            pane_id: None,
+            new_window: true,
+            workspace: Some("agents".to_string()),
+            horizontal: false,
+            left: false,
+            right: false,
+            top: false,
+            bottom: false,
+            cells: None,
+            percent: None,
+            repo: Some(repo_root.clone()),
+            worktree: WorktreeMode::Auto,
+            branch: Some("agent/scrape-api".to_string()),
+            cwd: None,
+            cmd: "codex".to_string(),
+        };
+        let expected_worktree = auto_worktree_path(&repo_root, "scrape-api");
+
+        let agent = promise::spawn::block_on(command.run_with(
+            &ConfigHandle::default_config(),
+            || async { Ok(ListAgentsResponse { agents: vec![] }) },
+            || async { panic!("list_panes should not be used for new-window agent spawn") },
+            || async {
+                Ok(ListAgentsResponse {
+                    agents: vec![sample_agent(88, "scrape-api")],
+                })
+            },
+            |_| async { panic!("resolve_pane_id should not be called") },
+            {
+                let spawn_calls = Rc::clone(&spawn_calls);
+                move |request| {
+                    spawn_calls.borrow_mut().push(request);
+                    async { Ok(sample_spawn_response(88, 30)) }
+                }
+            },
+            |_| async { panic!("split_pane should not be used") },
+            {
+                let set_calls = Rc::clone(&set_calls);
+                move |request| {
+                    set_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            |_| async { panic!("kill_pane should not be called") },
+            |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+        ))
+        .unwrap();
+
+        assert_eq!(agent.metadata.name, "scrape-api");
+        assert!(expected_worktree.exists());
+        assert!(git_worktree_exists(&repo_root, &expected_worktree).unwrap());
+        let repo_root_string = repo_root.to_string_lossy().to_string();
+        let worktree_string = expected_worktree.to_string_lossy().to_string();
+
+        let spawn_calls = spawn_calls.borrow();
+        assert_eq!(spawn_calls.len(), 1);
+        assert_eq!(spawn_calls[0].workspace, "agents");
+        assert_eq!(
+            spawn_calls[0].command_dir.as_deref(),
+            Some(worktree_string.as_str())
+        );
+
+        let set_calls = set_calls.borrow();
+        assert_eq!(set_calls.len(), 1);
+        assert_eq!(
+            set_calls[0].metadata.repo_root.as_deref(),
+            Some(repo_root_string.as_str())
+        );
+        assert_eq!(
+            set_calls[0].metadata.worktree.as_deref(),
+            Some(worktree_string.as_str())
+        );
+        assert_eq!(
+            set_calls[0].metadata.branch.as_deref(),
+            Some("agent/scrape-api")
+        );
+    }
+
+    #[test]
+    fn prepare_launch_rejects_worktree_owned_by_another_agent() {
+        let (_temp, repo_root) = init_git_repo();
+        let requested_worktree = auto_worktree_path(&repo_root, "alpha");
+        let command = SpawnAgentCommand {
+            name: "beta".to_string(),
+            split: false,
+            pane_id: None,
+            new_window: true,
+            workspace: None,
+            horizontal: false,
+            left: false,
+            right: false,
+            top: false,
+            bottom: false,
+            cells: None,
+            percent: None,
+            repo: Some(repo_root.clone()),
+            worktree: WorktreeMode::Path(requested_worktree.clone()),
+            branch: None,
+            cwd: None,
+            cmd: "codex".to_string(),
+        };
+        let mut owner = sample_agent(40, "alpha");
+        owner.metadata.worktree = Some(requested_worktree.to_string_lossy().to_string());
+
+        let err = command.prepare_launch(&[owner], None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("is already assigned to agent alpha")
+        );
     }
 }
