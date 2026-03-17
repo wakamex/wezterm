@@ -527,6 +527,7 @@ impl SessionHandler {
                                 .get_pane(pane_id)
                                 .ok_or_else(|| anyhow!("no such pane {}", pane_id))?;
                             pane.writer().write_all(&data)?;
+                            mux.record_agent_input(pane_id);
                             maybe_push_pane_changes(&pane, sender, per_pane)?;
                             Ok(Pdu::UnitResponse(UnitResponse {}))
                         },
@@ -585,6 +586,7 @@ impl SessionHandler {
                                 .get_pane(pane_id)
                                 .ok_or_else(|| anyhow!("no such pane {}", pane_id))?;
                             pane.send_paste(&data)?;
+                            mux.record_agent_input(pane_id);
                             maybe_push_pane_changes(&pane, sender, per_pane)?;
                             Ok(Pdu::UnitResponse(UnitResponse {}))
                         },

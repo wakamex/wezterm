@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand, ValueHint};
 use codec::{ListPanesResponse, SpawnV2};
 use config::keyassignment::SpawnTabDomain;
 use config::ConfigHandle;
-use mux::agent::{AgentMetadata, AgentSnapshot};
+use mux::agent::{AgentHarness, AgentMetadata, AgentSnapshot, AgentStatus};
 use mux::pane::PaneId;
 use mux::tab::{size_trace_enabled, SplitDirection, SplitRequest, SplitSize};
 use mux::window::WindowId;
@@ -705,7 +705,19 @@ impl ListAgentsCommand {
                         alignment: Alignment::Left,
                     },
                     Column {
+                        name: "STATUS".to_string(),
+                        alignment: Alignment::Left,
+                    },
+                    Column {
+                        name: "HARNESS".to_string(),
+                        alignment: Alignment::Left,
+                    },
+                    Column {
                         name: "CWD".to_string(),
+                        alignment: Alignment::Left,
+                    },
+                    Column {
+                        name: "PROGRESS".to_string(),
                         alignment: Alignment::Left,
                     },
                     Column {
@@ -722,7 +734,10 @@ impl ListAgentsCommand {
                             agent.tab_id.to_string(),
                             agent.window_id.to_string(),
                             agent.workspace.clone(),
+                            runtime_status_label(&agent.runtime.status),
+                            harness_label(&agent.runtime.harness),
                             agent.metadata.declared_cwd.clone(),
+                            inline_progress_summary(agent),
                             agent.metadata.launch_cmd.clone(),
                         ]
                     })
@@ -1080,6 +1095,36 @@ fn find_pane_cwd(panes: &ListPanesResponse, pane_id: PaneId) -> Option<String> {
     None
 }
 
+fn runtime_status_label(status: &AgentStatus) -> String {
+    match status {
+        AgentStatus::Starting => "starting",
+        AgentStatus::Busy => "busy",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Errored => "errored",
+        AgentStatus::Exited => "exited",
+    }
+    .to_string()
+}
+
+fn harness_label(harness: &AgentHarness) -> String {
+    match harness {
+        AgentHarness::Unknown => "unknown",
+        AgentHarness::Claude => "claude",
+        AgentHarness::Codex => "codex",
+    }
+    .to_string()
+}
+
+fn inline_progress_summary(agent: &AgentSnapshot) -> String {
+    agent
+        .runtime
+        .progress_summary
+        .as_deref()
+        .or(agent.runtime.observer_error.as_deref())
+        .map(|summary| summary.replace('\n', " "))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1168,6 +1213,21 @@ mod test {
                 worktree: None,
                 branch: None,
                 managed_checkout: false,
+            },
+            runtime: mux::agent::AgentRuntimeSnapshot {
+                harness: mux::agent::AgentHarness::Codex,
+                status: mux::agent::AgentStatus::Idle,
+                alive: true,
+                foreground_process_name: Some("codex".to_string()),
+                tty_name: Some("/dev/pts/1".to_string()),
+                last_input_at: None,
+                last_output_at: None,
+                last_progress_at: None,
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
+                session_path: None,
+                progress_summary: None,
+                terminal_progress: wezterm_term::Progress::None,
+                observer_error: None,
             },
             pane_id,
             tab_id: 20,

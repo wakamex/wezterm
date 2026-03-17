@@ -1,4 +1,7 @@
-use crate::agent::{AgentMetadata, AgentSnapshot};
+use crate::agent::{
+    AgentMetadata, AgentRuntimeSnapshot, AgentSnapshot, derive_runtime_status, infer_harness,
+    refresh_runtime_from_harness,
+};
 use crate::client::{ClientId, ClientInfo, ClientViewId, ClientViewState, ClientWindowViewState};
 use crate::pane::{CachePolicy, Pane, PaneId};
 use crate::ssh_agent::AgentProxy;
@@ -107,6 +110,7 @@ pub struct Mux {
     panes: RwLock<HashMap<PaneId, Arc<dyn Pane>>>,
     agent_panes_by_name: RwLock<HashMap<String, PaneId>>,
     agent_metadata_by_pane: RwLock<HashMap<PaneId, Arc<AgentMetadata>>>,
+    agent_runtime_by_pane: RwLock<HashMap<PaneId, AgentRuntimeSnapshot>>,
     windows: RwLock<HashMap<WindowId, Window>>,
     default_domain: RwLock<Option<Arc<dyn Domain>>>,
     domains: RwLock<HashMap<DomainId, Arc<dyn Domain>>>,
@@ -460,6 +464,7 @@ impl Mux {
             panes: RwLock::new(HashMap::new()),
             agent_panes_by_name: RwLock::new(HashMap::new()),
             agent_metadata_by_pane: RwLock::new(HashMap::new()),
+            agent_runtime_by_pane: RwLock::new(HashMap::new()),
             windows: RwLock::new(HashMap::new()),
             default_domain: RwLock::new(default_domain),
             domains_by_name: RwLock::new(domains_by_name),
@@ -578,6 +583,10 @@ impl Mux {
         }
 
         names.insert(metadata.name.clone(), pane_id);
+        self.agent_runtime_by_pane
+            .write()
+            .entry(pane_id)
+            .or_insert_with(|| AgentRuntimeSnapshot::new(&metadata));
         metadata_by_pane.insert(pane_id, Arc::new(metadata));
         Ok(())
     }
@@ -586,11 +595,99 @@ impl Mux {
         let mut metadata_by_pane = self.agent_metadata_by_pane.write();
         let metadata = metadata_by_pane.remove(&pane_id)?;
         self.agent_panes_by_name.write().remove(&metadata.name);
+        self.agent_runtime_by_pane.write().remove(&pane_id);
         Some(metadata)
     }
 
     pub fn get_agent_metadata_for_pane(&self, pane_id: PaneId) -> Option<Arc<AgentMetadata>> {
         self.agent_metadata_by_pane.read().get(&pane_id).cloned()
+    }
+
+    pub fn record_agent_input(&self, pane_id: PaneId) {
+        if self.get_agent_metadata_for_pane(pane_id).is_none() {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let mut runtime_by_pane = self.agent_runtime_by_pane.write();
+        let runtime = runtime_by_pane.entry(pane_id).or_insert_with(|| {
+            AgentRuntimeSnapshot::new(
+                self.get_agent_metadata_for_pane(pane_id)
+                    .as_deref()
+                    .expect("agent metadata checked above"),
+            )
+        });
+        runtime.last_input_at = Some(now);
+        runtime.observed_at = now;
+        runtime.status = derive_runtime_status(runtime);
+    }
+
+    pub fn record_agent_output(&self, pane_id: PaneId) {
+        if self.get_agent_metadata_for_pane(pane_id).is_none() {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let mut runtime_by_pane = self.agent_runtime_by_pane.write();
+        let runtime = runtime_by_pane.entry(pane_id).or_insert_with(|| {
+            AgentRuntimeSnapshot::new(
+                self.get_agent_metadata_for_pane(pane_id)
+                    .as_deref()
+                    .expect("agent metadata checked above"),
+            )
+        });
+        runtime.last_output_at = Some(now);
+        runtime.observed_at = now;
+        runtime.status = derive_runtime_status(runtime);
+    }
+
+    pub fn record_agent_terminal_progress(
+        &self,
+        pane_id: PaneId,
+        progress: wezterm_term::Progress,
+    ) {
+        if self.get_agent_metadata_for_pane(pane_id).is_none() {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let mut runtime_by_pane = self.agent_runtime_by_pane.write();
+        let runtime = runtime_by_pane.entry(pane_id).or_insert_with(|| {
+            AgentRuntimeSnapshot::new(
+                self.get_agent_metadata_for_pane(pane_id)
+                    .as_deref()
+                    .expect("agent metadata checked above"),
+            )
+        });
+        runtime.terminal_progress = progress;
+        runtime.last_progress_at = Some(now);
+        runtime.observed_at = now;
+        runtime.status = derive_runtime_status(runtime);
+    }
+
+    fn runtime_snapshot_for_agent(
+        &self,
+        pane_id: PaneId,
+        metadata: &AgentMetadata,
+        pane: &Arc<dyn Pane>,
+    ) -> AgentRuntimeSnapshot {
+        let mut runtime = self
+            .agent_runtime_by_pane
+            .read()
+            .get(&pane_id)
+            .cloned()
+            .unwrap_or_else(|| AgentRuntimeSnapshot::new(metadata));
+        runtime.alive = !pane.is_dead();
+        runtime.foreground_process_name = pane.get_foreground_process_name(CachePolicy::AllowStale);
+        runtime.tty_name = pane.tty_name();
+        runtime.terminal_progress = pane.get_progress();
+        runtime.harness = infer_harness(
+            &metadata.launch_cmd,
+            runtime.foreground_process_name.as_deref(),
+        );
+        refresh_runtime_from_harness(&mut runtime, metadata);
+        runtime.status = derive_runtime_status(&runtime);
+        self.agent_runtime_by_pane
+            .write()
+            .insert(pane_id, runtime.clone());
+        runtime
     }
 
     fn build_agent_snapshot(
@@ -601,8 +698,10 @@ impl Mux {
         let pane = self.get_pane(pane_id)?;
         let (_domain_id, window_id, tab_id) = self.resolve_pane_id(pane_id)?;
         let window = self.get_window(window_id)?;
+        let runtime = self.runtime_snapshot_for_agent(pane_id, metadata.as_ref(), &pane);
         Some(AgentSnapshot {
             metadata: (*metadata).clone(),
+            runtime,
             pane_id,
             tab_id,
             window_id,
@@ -1131,6 +1230,14 @@ impl Mux {
     }
 
     pub fn notify(&self, notification: MuxNotification) {
+        match &notification {
+            MuxNotification::PaneOutput(pane_id) => self.record_agent_output(*pane_id),
+            MuxNotification::Alert {
+                pane_id,
+                alert: wezterm_term::Alert::Progress(progress),
+            } => self.record_agent_terminal_progress(*pane_id, progress.clone()),
+            _ => {}
+        }
         let mut subscribers = self.subscribers.write();
         subscribers.retain(|_, notify| notify(notification.clone()));
     }
@@ -2522,6 +2629,47 @@ mod test {
         mux.remove_pane(pane_id);
         assert!(mux.list_agents().is_empty());
         assert!(mux.get_agent_metadata_for_pane(pane_id).is_none());
+    }
+
+    #[test]
+    fn agent_runtime_tracks_input_and_output_activity() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new(41, size, domain.id);
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_agent_metadata(pane_id, sample_agent_metadata("tracker"))
+            .unwrap();
+
+        mux.record_agent_input(pane_id);
+        mux.notify(MuxNotification::PaneOutput(pane_id));
+
+        let agents = mux.list_agents();
+        assert_eq!(agents.len(), 1);
+        let runtime = &agents[0].runtime;
+        assert_eq!(runtime.harness, crate::agent::AgentHarness::Codex);
+        assert_eq!(runtime.status, crate::agent::AgentStatus::Busy);
+        assert!(runtime.alive);
+        assert!(runtime.last_input_at.is_some());
+        assert!(runtime.last_output_at.is_some());
+        assert_eq!(runtime.foreground_process_name, None);
     }
 
     #[test]

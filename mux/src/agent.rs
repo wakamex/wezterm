@@ -2,8 +2,14 @@ use crate::domain::DomainId;
 use crate::pane::PaneId;
 use crate::tab::TabId;
 use crate::window::WindowId;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use url::Url;
+use wezterm_term::Progress;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentMetadata {
@@ -19,11 +25,528 @@ pub struct AgentMetadata {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentHarness {
+    Unknown,
+    Claude,
+    Codex,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentStatus {
+    Starting,
+    Busy,
+    Idle,
+    Errored,
+    Exited,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeSnapshot {
+    pub harness: AgentHarness,
+    pub status: AgentStatus,
+    pub alive: bool,
+    pub foreground_process_name: Option<String>,
+    pub tty_name: Option<String>,
+    pub last_input_at: Option<DateTime<Utc>>,
+    pub last_output_at: Option<DateTime<Utc>>,
+    pub last_progress_at: Option<DateTime<Utc>>,
+    pub observed_at: DateTime<Utc>,
+    pub session_path: Option<String>,
+    pub progress_summary: Option<String>,
+    pub terminal_progress: Progress,
+    pub observer_error: Option<String>,
+}
+
+impl AgentRuntimeSnapshot {
+    pub fn new(metadata: &AgentMetadata) -> Self {
+        let now = Utc::now();
+        let harness = infer_harness(&metadata.launch_cmd, None);
+        Self {
+            harness,
+            status: AgentStatus::Starting,
+            alive: true,
+            foreground_process_name: None,
+            tty_name: None,
+            last_input_at: None,
+            last_output_at: None,
+            last_progress_at: None,
+            observed_at: now,
+            session_path: None,
+            progress_summary: None,
+            terminal_progress: Progress::None,
+            observer_error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentSnapshot {
     pub metadata: AgentMetadata,
+    pub runtime: AgentRuntimeSnapshot,
     pub pane_id: PaneId,
     pub tab_id: TabId,
     pub window_id: WindowId,
     pub workspace: String,
     pub domain_id: DomainId,
+}
+
+pub fn infer_harness(launch_cmd: &str, foreground_process_name: Option<&str>) -> AgentHarness {
+    let mut candidates = vec![launch_cmd.to_ascii_lowercase()];
+    if let Some(name) = foreground_process_name {
+        candidates.push(name.to_ascii_lowercase());
+    }
+    for candidate in &candidates {
+        if candidate.contains("claude") {
+            return AgentHarness::Claude;
+        }
+        if candidate.contains("codex") {
+            return AgentHarness::Codex;
+        }
+    }
+    AgentHarness::Unknown
+}
+
+pub fn derive_runtime_status(runtime: &AgentRuntimeSnapshot) -> AgentStatus {
+    if !runtime.alive {
+        return AgentStatus::Exited;
+    }
+
+    if matches!(runtime.terminal_progress, Progress::Error(_)) {
+        return AgentStatus::Errored;
+    }
+
+    if matches!(
+        runtime.terminal_progress,
+        Progress::Percentage(_) | Progress::Indeterminate
+    ) {
+        return AgentStatus::Busy;
+    }
+
+    let activity_times = [
+        runtime.last_input_at,
+        runtime.last_output_at,
+        runtime.last_progress_at,
+    ];
+    let last_activity = activity_times.iter().flatten().copied().max();
+
+    match last_activity {
+        None => AgentStatus::Starting,
+        Some(ts) if Utc::now() - ts <= Duration::seconds(30) => AgentStatus::Busy,
+        Some(_) => AgentStatus::Idle,
+    }
+}
+
+pub fn refresh_runtime_from_harness(
+    runtime: &mut AgentRuntimeSnapshot,
+    metadata: &AgentMetadata,
+) {
+    let normalized_cwd = normalize_declared_cwd(&metadata.declared_cwd);
+    let cwd = normalized_cwd.trim();
+    if cwd.is_empty() {
+        runtime.observed_at = Utc::now();
+        runtime.status = derive_runtime_status(runtime);
+        return;
+    }
+
+    runtime.observer_error = None;
+    runtime.observed_at = Utc::now();
+    let harness = infer_harness(
+        &metadata.launch_cmd,
+        runtime.foreground_process_name.as_deref(),
+    );
+    runtime.harness = harness.clone();
+
+    let observed = match harness {
+        AgentHarness::Claude => observe_claude(cwd),
+        AgentHarness::Codex => observe_codex(cwd),
+        AgentHarness::Unknown => Ok(None),
+    };
+
+    match observed {
+        Ok(Some(snapshot)) => {
+            runtime.session_path = snapshot.session_path;
+            runtime.progress_summary = snapshot.progress_summary;
+            if let Some(ts) = snapshot.updated_at {
+                runtime.last_progress_at = Some(
+                    runtime
+                        .last_progress_at
+                        .map(|existing| existing.max(ts))
+                        .unwrap_or(ts),
+                );
+            }
+        }
+        Ok(None) => {
+            if !matches!(runtime.harness, AgentHarness::Unknown) {
+                runtime.session_path = None;
+                runtime.progress_summary = None;
+            }
+        }
+        Err(err) => {
+            runtime.observer_error = Some(err.to_string());
+        }
+    }
+
+    runtime.status = derive_runtime_status(runtime);
+}
+
+#[derive(Debug)]
+struct HarnessObservation {
+    session_path: Option<String>,
+    progress_summary: Option<String>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+fn observe_claude(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
+    let Some(root) = claude_sessions_root() else {
+        return Ok(None);
+    };
+    let project_dir = root.join(cwd.replace('/', "-"));
+    if !project_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    for entry in fs::read_dir(&project_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if !claude_session_is_interactive(&path)? {
+            continue;
+        }
+        let mtime = entry.metadata()?.modified()?;
+        match &latest {
+            Some((_, existing_mtime)) if *existing_mtime >= mtime => {}
+            _ => latest = Some((path, mtime)),
+        }
+    }
+
+    let Some((session, mtime)) = latest else {
+        return Ok(None);
+    };
+    Ok(Some(HarnessObservation {
+        session_path: Some(session.to_string_lossy().to_string()),
+        progress_summary: read_last_claude_summary(&session)?,
+        updated_at: Some(DateTime::<Utc>::from(mtime)),
+    }))
+}
+
+fn observe_codex(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
+    let Some(root) = codex_sessions_root() else {
+        return Ok(None);
+    };
+
+    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    for days_ago in 0..=6 {
+        let day = Utc::now() - Duration::days(days_ago);
+        let dir = root
+            .join(format!("{:04}", day.year()))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        if !dir.is_dir() {
+            continue;
+        }
+
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if !codex_session_matches_cwd(&path, cwd)? {
+                continue;
+            }
+            let mtime = entry.metadata()?.modified()?;
+            match &latest {
+                Some((_, existing_mtime)) if *existing_mtime >= mtime => {}
+                _ => latest = Some((path, mtime)),
+            }
+        }
+    }
+
+    let Some((session, mtime)) = latest else {
+        return Ok(None);
+    };
+    Ok(Some(HarnessObservation {
+        session_path: Some(session.to_string_lossy().to_string()),
+        progress_summary: read_last_codex_summary(&session)?,
+        updated_at: Some(DateTime::<Utc>::from(mtime)),
+    }))
+}
+
+fn claude_sessions_root() -> Option<PathBuf> {
+    std::env::var_os("WEZTERM_AGENT_CLAUDE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".claude").join("projects")))
+}
+
+fn codex_sessions_root() -> Option<PathBuf> {
+    std::env::var_os("WEZTERM_AGENT_CODEX_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".codex").join("sessions")))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+fn claude_session_is_interactive(path: &Path) -> anyhow::Result<bool> {
+    let Some(first_line) = BufReader::new(fs::File::open(path)?)
+        .lines()
+        .next()
+        .transpose()?
+    else {
+        return Ok(true);
+    };
+    let record: Value = serde_json::from_str(&first_line)?;
+    Ok(record.get("type").and_then(Value::as_str) != Some("queue-operation"))
+}
+
+fn codex_session_matches_cwd(path: &Path, cwd: &str) -> anyhow::Result<bool> {
+    let Some(first_line) = BufReader::new(fs::File::open(path)?)
+        .lines()
+        .next()
+        .transpose()?
+    else {
+        return Ok(false);
+    };
+    let record: Value = serde_json::from_str(&first_line)?;
+    Ok(record
+        .get("payload")
+        .and_then(|payload| payload.get("cwd"))
+        .and_then(Value::as_str)
+        == Some(cwd))
+}
+
+fn read_last_claude_summary(path: &Path) -> anyhow::Result<Option<String>> {
+    let reader = BufReader::new(fs::File::open(path)?);
+    let mut summary = None;
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if record.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = record
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+
+        let mut parts = vec![];
+        for block in content {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            parts.push(text.to_string());
+                        }
+                    }
+                }
+                Some("tool_use")
+                    if block.get("name").and_then(Value::as_str) == Some("ExitPlanMode") =>
+                {
+                    if let Some(plan) = block
+                        .get("input")
+                        .and_then(|input| input.get("plan"))
+                        .and_then(Value::as_str)
+                    {
+                        let plan = plan.trim();
+                        if !plan.is_empty() {
+                            parts.push(format!("PLAN: {plan}"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !parts.is_empty() {
+            summary = Some(truncate_summary(&parts.join("\n")));
+        }
+    }
+    Ok(summary)
+}
+
+fn read_last_codex_summary(path: &Path) -> anyhow::Result<Option<String>> {
+    let reader = BufReader::new(fs::File::open(path)?);
+    let mut summary = None;
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if record.get("type").and_then(Value::as_str) != Some("response_item") {
+            continue;
+        }
+        let Some(payload) = record.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("message")
+            || payload.get("role").and_then(Value::as_str) != Some("assistant")
+        {
+            continue;
+        }
+        let Some(content) = payload.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut parts = vec![];
+        for block in content {
+            if block.get("type").and_then(Value::as_str) == Some("output_text") {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        parts.push(text.to_string());
+                    }
+                }
+            }
+        }
+        if !parts.is_empty() {
+            summary = Some(truncate_summary(&parts.join("\n")));
+        }
+    }
+    Ok(summary)
+}
+
+fn truncate_summary(summary: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    if summary.chars().count() <= MAX_CHARS {
+        return summary.to_string();
+    }
+    let truncated = summary.chars().take(MAX_CHARS).collect::<String>();
+    format!("{truncated}...")
+}
+
+fn normalize_declared_cwd(cwd: &str) -> String {
+    if cwd.starts_with("file://") {
+        if let Ok(url) = Url::parse(cwd) {
+            if let Ok(path) = url.to_file_path() {
+                return path.to_string_lossy().to_string();
+            }
+        }
+    }
+    cwd.to_string()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env_path(key: &str, path: &Path) {
+        unsafe {
+            std::env::set_var(key, path);
+        }
+    }
+
+    fn remove_env_var(key: &str) {
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn infers_harness_from_launch_command_or_foreground_process() {
+        assert_eq!(infer_harness("codex --model gpt-5", None), AgentHarness::Codex);
+        assert_eq!(infer_harness("python agent.py", Some("claude")), AgentHarness::Claude);
+        assert_eq!(infer_harness("python agent.py", None), AgentHarness::Unknown);
+    }
+
+    #[test]
+    fn derives_runtime_status_from_liveness_progress_and_recent_activity() {
+        let metadata = AgentMetadata {
+            agent_id: "id".to_string(),
+            name: "alpha".to_string(),
+            launch_cmd: "codex".to_string(),
+            declared_cwd: "/tmp/alpha".to_string(),
+            created_at: Utc::now(),
+            repo_root: None,
+            worktree: None,
+            branch: None,
+            managed_checkout: false,
+        };
+        let mut runtime = AgentRuntimeSnapshot::new(&metadata);
+        assert_eq!(derive_runtime_status(&runtime), AgentStatus::Starting);
+
+        runtime.last_output_at = Some(Utc::now());
+        assert_eq!(derive_runtime_status(&runtime), AgentStatus::Busy);
+
+        runtime.last_output_at = Some(Utc::now() - Duration::minutes(5));
+        assert_eq!(derive_runtime_status(&runtime), AgentStatus::Idle);
+
+        runtime.terminal_progress = Progress::Error(1);
+        assert_eq!(derive_runtime_status(&runtime), AgentStatus::Errored);
+
+        runtime.alive = false;
+        assert_eq!(derive_runtime_status(&runtime), AgentStatus::Exited);
+    }
+
+    #[test]
+    fn observes_latest_claude_session_summary() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = "/tmp/project-a";
+        let project_dir = temp.path().join(cwd.replace('/', "-"));
+        fs::create_dir_all(&project_dir).unwrap();
+        let session = project_dir.join("session.jsonl");
+        fs::write(
+            &session,
+            concat!(
+                "{\"type\":\"user\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        set_env_path("WEZTERM_AGENT_CLAUDE_DIR", temp.path());
+        let observed = observe_claude(cwd).unwrap().unwrap();
+        remove_env_var("WEZTERM_AGENT_CLAUDE_DIR");
+
+        assert_eq!(observed.progress_summary.as_deref(), Some("done"));
+        assert_eq!(observed.session_path.as_deref(), Some(session.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn observes_latest_codex_session_summary() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let day = Utc::now();
+        let dir = temp
+            .path()
+            .join(format!("{:04}", day.year_ce().1))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("rollout-test.jsonl");
+        fs::write(
+            &session,
+            concat!(
+                "{\"payload\":{\"cwd\":\"/tmp/project-b\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"all good\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        set_env_path("WEZTERM_AGENT_CODEX_DIR", temp.path());
+        let observed = observe_codex("/tmp/project-b").unwrap().unwrap();
+        remove_env_var("WEZTERM_AGENT_CODEX_DIR");
+
+        assert_eq!(observed.progress_summary.as_deref(), Some("all good"));
+        assert_eq!(observed.session_path.as_deref(), Some(session.to_string_lossy().as_ref()));
+    }
 }
