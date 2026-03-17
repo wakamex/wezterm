@@ -1101,6 +1101,7 @@ mod test {
     use mux::window::WindowId;
     use mux::Mux;
     use std::collections::HashMap;
+    use std::sync::Once;
     use std::sync::Arc;
     use termwiz::surface::{CursorShape, CursorVisibility};
     use wezterm_term::TerminalSize;
@@ -1115,6 +1116,13 @@ mod test {
 
     lazy_static::lazy_static! {
         static ref TEST_MUX_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    }
+
+    fn ensure_test_executor() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = Box::leak(Box::new(promise::spawn::SimpleExecutor::new()));
+        });
     }
 
     fn size(cols: usize, rows: usize) -> TerminalSize {
@@ -1233,7 +1241,7 @@ mod test {
     #[test]
     fn mirrored_domains_keep_active_tabs_divergent_across_reconcile_lifecycle() {
         let _test_lock = TEST_MUX_LOCK.lock();
-        let _executor = promise::spawn::SimpleExecutor::new();
+        ensure_test_executor();
         let mux = Arc::new(Mux::new(None));
         Mux::set_mux(&mux);
         let _guard = MuxGuard;
@@ -1378,6 +1386,43 @@ mod test {
                 local_tab_b_101,
             ),
             inner_b.remote_to_local_pane_id(1001)
+        );
+    }
+
+    #[test]
+    fn first_reconcile_seeds_usable_active_pane_for_current_identity() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        ensure_test_executor();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let (_domain, inner, client_id, _view_id) = install_client_domain(&mux, "focus-view");
+
+        let tab_a = leaf(1, 101, 1001, size(120, 40), true);
+        let tab_b = leaf(1, 102, 1002, size(120, 40), true);
+
+        apply_panes(
+            &mux,
+            inner.clone(),
+            client_id.clone(),
+            panes_response(vec![tab_a, tab_b], 102, 1002),
+        );
+
+        let local_window_id = inner.remote_to_local_window(1).unwrap();
+        let local_tab_id = inner.remote_to_local_tab_id(102).unwrap();
+        let local_pane_id = inner.remote_to_local_pane_id(1002).unwrap();
+
+        let _identity = mux.with_identity(Some(client_id));
+        assert_eq!(
+            mux.get_active_tab_for_window_for_current_identity(local_window_id)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_id)
+        );
+        assert_eq!(
+            mux.get_active_pane_for_window_for_current_identity(local_window_id)
+                .map(|pane| pane.pane_id()),
+            Some(local_pane_id)
         );
     }
 }

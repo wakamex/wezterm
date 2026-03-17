@@ -1814,4 +1814,30 @@ mod test {
             Some(layout.left_tab_id)
         );
     }
+
+    #[test]
+    fn get_client_list_reports_bootstrapped_workspace_and_focus() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let executor = SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let layout = build_test_layout(&mux);
+        let (client_id, _view_id, mut handler) = register_test_client(&mux, "client-list");
+
+        let response = match handler.request(&executor, Pdu::GetClientList(GetClientList)) {
+            Pdu::GetClientListResponse(response) => response,
+            other => panic!("expected GetClientListResponse, got {:?}", other),
+        };
+
+        let client = response
+            .clients
+            .into_iter()
+            .find(|info| info.client_id.as_ref() == client_id.as_ref())
+            .expect("client to be listed");
+
+        assert_eq!(client.active_workspace.as_deref(), Some("default"));
+        assert_eq!(client.focused_pane_id, Some(layout.left_pane_id));
+    }
 }
