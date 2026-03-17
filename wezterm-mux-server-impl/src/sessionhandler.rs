@@ -846,6 +846,7 @@ impl SessionHandler {
                                 .get_pane(pane_id)
                                 .ok_or_else(|| anyhow!("no such pane {}", pane_id))?;
                             pane.key_down(event.key, event.modifiers)?;
+                            mux.record_agent_input(pane_id);
 
                             // For a key press, we want to always send back the
                             // cursor position so that the predictive echo doesn't

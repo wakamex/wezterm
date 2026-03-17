@@ -32,6 +32,12 @@ pub enum AgentHarness {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentTransport {
+    PlainPty,
+    ObservedPty,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AgentStatus {
     Starting,
     Busy,
@@ -43,6 +49,7 @@ pub enum AgentStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntimeSnapshot {
     pub harness: AgentHarness,
+    pub transport: AgentTransport,
     pub status: AgentStatus,
     pub alive: bool,
     pub foreground_process_name: Option<String>,
@@ -63,6 +70,7 @@ impl AgentRuntimeSnapshot {
         let harness = infer_harness(&metadata.launch_cmd, None);
         Self {
             harness,
+            transport: AgentTransport::PlainPty,
             status: AgentStatus::Starting,
             alive: true,
             foreground_process_name: None,
@@ -186,6 +194,11 @@ pub fn refresh_runtime_from_harness(
         }
     }
 
+    runtime.transport = if runtime.session_path.is_some() {
+        AgentTransport::ObservedPty
+    } else {
+        AgentTransport::PlainPty
+    };
     runtime.status = derive_runtime_status(runtime);
 }
 
