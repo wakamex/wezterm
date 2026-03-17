@@ -622,6 +622,21 @@ impl Mux {
         agents
     }
 
+    pub fn annotate_pane_tree_with_agent_metadata(&self, node: &mut crate::tab::PaneNode) {
+        match node {
+            crate::tab::PaneNode::Empty => {}
+            crate::tab::PaneNode::Leaf(entry) => {
+                entry.agent_metadata = self
+                    .get_agent_metadata_for_pane(entry.pane_id)
+                    .map(|metadata| (*metadata).clone());
+            }
+            crate::tab::PaneNode::Split { left, right, .. } => {
+                self.annotate_pane_tree_with_agent_metadata(left);
+                self.annotate_pane_tree_with_agent_metadata(right);
+            }
+        }
+    }
+
     pub fn get_active_tab_id_for_window_for_client(
         &self,
         view_id: &ClientViewId,

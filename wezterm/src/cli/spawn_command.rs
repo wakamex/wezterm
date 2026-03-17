@@ -186,6 +186,7 @@ mod test {
             window_id,
             tab_id,
             pane_id,
+            agent_metadata: None,
             title: String::new(),
             size,
             working_dir: None,

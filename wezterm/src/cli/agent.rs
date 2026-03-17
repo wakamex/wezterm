@@ -343,6 +343,7 @@ mod test {
             window_id,
             tab_id,
             pane_id,
+            agent_metadata: None,
             title: format!("pane-{pane_id}"),
             size: size(80, 24),
             working_dir: Some(SerdeUrl::try_from(format!("file:///tmp/pane-{pane_id}")).unwrap()),

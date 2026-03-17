@@ -450,9 +450,10 @@ impl SessionHandler {
                                                 .get(&tab.tab_id())
                                                 .and_then(|tab_state| tab_state.active_pane_id)
                                         });
-                                    tabs.push(tab.codec_pane_tree_with_active_pane_id(
-                                        active_pane_id,
-                                    ));
+                                    let mut tree =
+                                        tab.codec_pane_tree_with_active_pane_id(active_pane_id);
+                                    mux.annotate_pane_tree_with_agent_metadata(&mut tree);
+                                    tabs.push(tree);
                                     tab_titles.push(tab.get_title());
                                 }
                             }
@@ -1930,6 +1931,31 @@ mod test {
         assert_eq!(listed.agents[0].pane_id, layout.left_pane_id);
         assert_eq!(listed.agents[0].tab_id, layout.left_tab_id);
         assert_eq!(listed.agents[0].window_id, layout.window_id);
+
+        let panes = match handler.request(&executor, Pdu::ListPanes(ListPanes {})) {
+            Pdu::ListPanesResponse(response) => response,
+            other => panic!("expected ListPanesResponse, got {:?}", other),
+        };
+        let mut found = None;
+        for tab in panes.tabs {
+            let mut cursor = tab.into_tree().cursor();
+            loop {
+                if let Some(entry) = cursor.leaf_mut() {
+                    if entry.pane_id == layout.left_pane_id {
+                        found = entry.agent_metadata.clone();
+                        break;
+                    }
+                }
+                match cursor.preorder_next() {
+                    Ok(next) => cursor = next,
+                    Err(_) => break,
+                }
+            }
+        }
+        assert_eq!(
+            found.as_ref().map(|metadata| metadata.name.as_str()),
+            Some("alpha")
+        );
 
         assert!(matches!(
             handler.request(
