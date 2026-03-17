@@ -2,7 +2,7 @@ use clap::Parser;
 use codec::{Pdu, SetClientId};
 use config::ConfigHandle;
 use mux::activity::Activity;
-use mux::client::ClientId;
+use mux::client::{ClientId, ClientViewId};
 use mux::Mux;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -32,6 +32,7 @@ impl ProxyCommand {
 
         let pdu = Pdu::SetClientId(SetClientId {
             client_id: ClientId::new(),
+            view_id: ClientViewId::persistent(),
             is_proxy: true,
         });
         let serial = 1;

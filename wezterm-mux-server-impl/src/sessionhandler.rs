@@ -319,6 +319,7 @@ impl SessionHandler {
             }
             Pdu::SetClientId(SetClientId {
                 mut client_id,
+                view_id,
                 is_proxy,
             }) => {
                 if is_proxy {
@@ -347,14 +348,30 @@ impl SessionHandler {
                         client_id.pid,
                     );
                     let client_id = Arc::new(client_id);
+                    let view_id = Arc::new(view_id);
                     self.client_id.replace(client_id.clone());
                     spawn_into_main_thread(async move {
                         let mux = Mux::get();
-                        mux.register_client(client_id);
+                        mux.register_client(client_id, view_id);
                     })
                     .detach();
                 }
                 send_response(Ok(Pdu::UnitResponse(UnitResponse {})))
+            }
+            Pdu::SetClientActiveTab(SetClientActiveTab { window_id, tab_id }) => {
+                let client_id = self.client_id.clone();
+                spawn_into_main_thread(async move {
+                    catch(
+                        move || {
+                            let mux = Mux::get();
+                            let _identity = mux.with_identity(client_id);
+                            mux.set_active_tab_for_current_identity(window_id, tab_id)?;
+                            Ok(Pdu::UnitResponse(UnitResponse {}))
+                        },
+                        send_response,
+                    )
+                })
+                .detach();
             }
             Pdu::SetFocusedPane(SetFocusedPane { pane_id }) => {
                 let client_id = self.client_id.clone();
@@ -364,32 +381,15 @@ impl SessionHandler {
                             let mux = Mux::get();
                             let _identity = mux.with_identity(client_id);
 
-                            let pane = mux
-                                .get_pane(pane_id)
+                            mux.get_pane(pane_id)
                                 .ok_or_else(|| anyhow::anyhow!("pane {pane_id} not found"))?;
 
                             let (_domain_id, window_id, tab_id) = mux
                                 .resolve_pane_id(pane_id)
                                 .ok_or_else(|| anyhow::anyhow!("pane {pane_id} not found"))?;
-                            {
-                                let mut window =
-                                    mux.get_window_mut(window_id).ok_or_else(|| {
-                                        anyhow::anyhow!("window {window_id} not found")
-                                    })?;
-                                let tab_idx = window.idx_by_id(tab_id).ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "tab {tab_id} isn't really in window {window_id}!?"
-                                    )
-                                })?;
-                                window.save_and_then_set_active(tab_idx);
-                            }
-                            let tab = mux
-                                .get_tab(tab_id)
-                                .ok_or_else(|| anyhow::anyhow!("tab {tab_id} not found"))?;
-                            tab.set_active_pane(&pane, NotifyMux::No);
+                            mux.set_active_pane_for_current_identity(window_id, tab_id, pane_id)?;
 
                             mux.record_focus_for_current_identity(pane_id);
-                            mux.notify(mux::MuxNotification::PaneFocused(pane_id));
 
                             Ok(Pdu::UnitResponse(UnitResponse {}))
                         },
@@ -414,22 +414,31 @@ impl SessionHandler {
                 .detach();
             }
             Pdu::ListPanes(ListPanes {}) => {
+                let client_id = self.client_id.clone();
                 spawn_into_main_thread(async move {
                     catch(
                         move || {
                             let mux = Mux::get();
+                            let _identity = mux.with_identity(client_id);
+                            let view_state = mux.client_window_view_state_for_current_identity();
                             let mut tabs = vec![];
                             let mut tab_titles = vec![];
                             let mut window_titles = HashMap::new();
-                            let mut active_tabs = HashMap::new();
                             for window_id in mux.iter_windows().into_iter() {
                                 let window = mux.get_window(window_id).unwrap();
                                 window_titles.insert(window_id, window.get_title().to_string());
-                                if let Some(active_tab) = window.get_active() {
-                                    active_tabs.insert(window_id, active_tab.tab_id());
-                                }
                                 for tab in window.iter() {
-                                    tabs.push(tab.codec_pane_tree());
+                                    let active_pane_id = view_state
+                                        .get(&window_id)
+                                        .and_then(|window_state| {
+                                            window_state
+                                                .tabs
+                                                .get(&tab.tab_id())
+                                                .and_then(|tab_state| tab_state.active_pane_id)
+                                        });
+                                    tabs.push(tab.codec_pane_tree_with_active_pane_id(
+                                        active_pane_id,
+                                    ));
                                     tab_titles.push(tab.get_title());
                                 }
                             }
@@ -438,7 +447,7 @@ impl SessionHandler {
                                 tabs,
                                 tab_titles,
                                 window_titles,
-                                active_tabs,
+                                client_window_view_state: view_state,
                             }))
                         },
                         send_response,
@@ -1299,4 +1308,487 @@ async fn move_pane(
         tab_id: tab.tab_id(),
         window_id,
     }))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use mux::client::{ClientTabViewState, ClientViewId, ClientWindowViewState};
+    use mux::pane::{alloc_pane_id, CachePolicy, Pane};
+    use mux::pane::LogicalLine;
+    use mux::renderable::RenderableDimensions;
+    use mux::tab::{SplitDirection, SplitRequest, SplitSize, Tab};
+    use mux::window::WindowId;
+    use promise::spawn::SimpleExecutor;
+    use rangeset::RangeSet;
+    use std::io::Write;
+    use std::ops::Range;
+    use termwiz::surface::{CursorShape, CursorVisibility, Line, SequenceNo};
+    use url::Url;
+    use wezterm_term::color::ColorPalette;
+    use wezterm_term::{KeyCode, KeyModifiers, MouseEvent, StableRowIndex, TerminalSize};
+
+    struct TestPane {
+        id: PaneId,
+        size: Mutex<TerminalSize>,
+        title: String,
+    }
+
+    impl TestPane {
+        fn new(id: PaneId, size: TerminalSize, title: &str) -> Arc<dyn Pane> {
+            Arc::new(Self {
+                id,
+                size: Mutex::new(size),
+                title: title.to_string(),
+            })
+        }
+    }
+
+    impl Pane for TestPane {
+        fn pane_id(&self) -> PaneId {
+            self.id
+        }
+
+        fn get_cursor_position(&self) -> StableCursorPosition {
+            StableCursorPosition {
+                x: 0,
+                y: 0,
+                shape: CursorShape::Default,
+                visibility: CursorVisibility::Visible,
+            }
+        }
+
+        fn get_current_seqno(&self) -> SequenceNo {
+            0
+        }
+
+        fn get_changed_since(
+            &self,
+            _lines: Range<StableRowIndex>,
+            _seqno: SequenceNo,
+        ) -> RangeSet<StableRowIndex> {
+            RangeSet::new()
+        }
+
+        fn with_lines_mut(
+            &self,
+            _stable_range: Range<StableRowIndex>,
+            _with_lines: &mut dyn mux::pane::WithPaneLines,
+        ) {
+            unimplemented!()
+        }
+
+        fn for_each_logical_line_in_stable_range_mut(
+            &self,
+            _lines: Range<StableRowIndex>,
+            _for_line: &mut dyn mux::pane::ForEachPaneLogicalLine,
+        ) {
+            unimplemented!()
+        }
+
+        fn get_lines(&self, _lines: Range<StableRowIndex>) -> (StableRowIndex, Vec<Line>) {
+            (0, vec![])
+        }
+
+        fn get_logical_lines(&self, _lines: Range<StableRowIndex>) -> Vec<LogicalLine> {
+            vec![]
+        }
+
+        fn get_dimensions(&self) -> RenderableDimensions {
+            let size = self.size.lock().unwrap();
+            RenderableDimensions {
+                cols: size.cols,
+                viewport_rows: size.rows,
+                scrollback_rows: size.rows,
+                physical_top: 0,
+                scrollback_top: 0,
+                dpi: size.dpi,
+                pixel_width: size.pixel_width,
+                pixel_height: size.pixel_height,
+                reverse_video: false,
+            }
+        }
+
+        fn get_title(&self) -> String {
+            self.title.clone()
+        }
+
+        fn send_paste(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+            Ok(None)
+        }
+
+        fn writer(&self) -> parking_lot::MappedMutexGuard<'_, dyn Write> {
+            unimplemented!()
+        }
+
+        fn resize(&self, size: TerminalSize) -> anyhow::Result<()> {
+            *self.size.lock().unwrap() = size;
+            Ok(())
+        }
+
+        fn key_down(&self, _key: KeyCode, _mods: KeyModifiers) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn key_up(&self, _key: KeyCode, _mods: KeyModifiers) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn mouse_event(&self, _event: MouseEvent) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_dead(&self) -> bool {
+            false
+        }
+
+        fn palette(&self) -> ColorPalette {
+            ColorPalette::default()
+        }
+
+        fn domain_id(&self) -> mux::domain::DomainId {
+            0
+        }
+
+        fn is_mouse_grabbed(&self) -> bool {
+            false
+        }
+
+        fn is_alt_screen_active(&self) -> bool {
+            false
+        }
+
+        fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
+            None
+        }
+    }
+
+    struct MuxGuard;
+
+    impl Drop for MuxGuard {
+        fn drop(&mut self) {
+            Mux::shutdown();
+        }
+    }
+
+    lazy_static::lazy_static! {
+        static ref TEST_MUX_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    }
+
+    struct HandlerHarness {
+        handler: SessionHandler,
+        responses: smol::channel::Receiver<DecodedPdu>,
+    }
+
+    impl HandlerHarness {
+        fn new(client_id: Arc<ClientId>) -> Self {
+            let (tx, rx) = smol::channel::unbounded();
+            let sender = PduSender::new(move |decoded| {
+                tx.try_send(decoded).unwrap();
+                Ok(())
+            });
+            let mut handler = SessionHandler::new(sender);
+            handler.client_id = Some(client_id);
+            Self { handler, responses: rx }
+        }
+
+        fn request(&mut self, executor: &SimpleExecutor, pdu: Pdu) -> Pdu {
+            self.handler.process_one(DecodedPdu { pdu, serial: 1 });
+            loop {
+                if let Ok(decoded) = self.responses.try_recv() {
+                    return decoded.pdu;
+                }
+                executor.tick().unwrap();
+            }
+        }
+    }
+
+    struct TestLayout {
+        window_id: WindowId,
+        left_tab_id: TabId,
+        right_tab_id: TabId,
+        right_pane_id: PaneId,
+        split_tab_id: TabId,
+        split_left_pane_id: PaneId,
+        split_right_pane_id: PaneId,
+    }
+
+    fn size(cols: usize, rows: usize) -> TerminalSize {
+        TerminalSize {
+            cols,
+            rows,
+            pixel_width: cols * 8,
+            pixel_height: rows * 18,
+            dpi: 96,
+        }
+    }
+
+    fn build_test_layout(mux: &Arc<Mux>) -> TestLayout {
+        let window_id = *mux.new_empty_window(Some("default".to_string()), None);
+        let tab_size = size(120, 40);
+
+        let left_tab = Arc::new(Tab::new(&tab_size));
+        let left_pane = TestPane::new(alloc_pane_id(), tab_size, "left");
+        let left_pane_id = left_pane.pane_id();
+        left_tab.assign_pane(&left_pane);
+        mux.add_tab_and_active_pane(&left_tab).unwrap();
+        mux.add_tab_to_window(&left_tab, window_id).unwrap();
+
+        let right_tab = Arc::new(Tab::new(&tab_size));
+        let right_pane = TestPane::new(alloc_pane_id(), tab_size, "right");
+        let right_pane_id = right_pane.pane_id();
+        right_tab.assign_pane(&right_pane);
+        mux.add_tab_and_active_pane(&right_tab).unwrap();
+        mux.add_tab_to_window(&right_tab, window_id).unwrap();
+
+        let split_tab = Arc::new(Tab::new(&tab_size));
+        let split_left = TestPane::new(alloc_pane_id(), tab_size, "split-left");
+        let split_left_pane_id = split_left.pane_id();
+        split_tab.assign_pane(&split_left);
+        let split_right = TestPane::new(alloc_pane_id(), tab_size, "split-right");
+        let split_right_pane_id = split_right.pane_id();
+        split_tab
+            .split_and_insert(
+                0,
+                SplitRequest {
+                    direction: SplitDirection::Horizontal,
+                    target_is_second: true,
+                    top_level: false,
+                    size: SplitSize::Percent(50),
+                },
+                split_right,
+            )
+            .unwrap();
+        mux.add_tab_and_active_pane(&split_tab).unwrap();
+        mux.add_tab_to_window(&split_tab, window_id).unwrap();
+
+        let _ = left_pane_id;
+
+        TestLayout {
+            window_id,
+            left_tab_id: left_tab.tab_id(),
+            right_tab_id: right_tab.tab_id(),
+            right_pane_id,
+            split_tab_id: split_tab.tab_id(),
+            split_left_pane_id,
+            split_right_pane_id,
+        }
+    }
+
+    fn register_test_client(
+        mux: &Arc<Mux>,
+        view_name: &str,
+    ) -> (Arc<ClientId>, Arc<ClientViewId>, HandlerHarness) {
+        let client_id = Arc::new(ClientId::new());
+        let view_id = Arc::new(ClientViewId(view_name.to_string()));
+        mux.register_client(client_id.clone(), view_id.clone());
+        let harness = HandlerHarness::new(client_id.clone());
+        (client_id, view_id, harness)
+    }
+
+    #[test]
+    fn set_client_active_tab_updates_only_requesting_view() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let executor = SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let layout = build_test_layout(&mux);
+        let (_client_a, view_a, mut handler_a) = register_test_client(&mux, "view-a");
+        let (_client_b, view_b, _handler_b) = register_test_client(&mux, "view-b");
+
+        mux.set_active_tab_for_client_view(view_a.as_ref(), layout.window_id, layout.left_tab_id)
+            .unwrap();
+        mux.set_active_tab_for_client_view(view_b.as_ref(), layout.window_id, layout.left_tab_id)
+            .unwrap();
+
+        assert!(matches!(
+            handler_a.request(&executor, Pdu::SetClientActiveTab(SetClientActiveTab {
+                window_id: layout.window_id,
+                tab_id: layout.right_tab_id,
+            })),
+            Pdu::UnitResponse(_)
+        ));
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_a.as_ref(), layout.window_id)
+                .map(|tab| tab.tab_id()),
+            Some(layout.right_tab_id)
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_b.as_ref(), layout.window_id)
+                .map(|tab| tab.tab_id()),
+            Some(layout.left_tab_id)
+        );
+    }
+
+    #[test]
+    fn set_focused_pane_updates_only_requesting_view() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let executor = SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let layout = build_test_layout(&mux);
+        let (_client_a, view_a, mut handler_a) = register_test_client(&mux, "view-a");
+        let (_client_b, view_b, _handler_b) = register_test_client(&mux, "view-b");
+
+        mux.set_active_tab_for_client_view(view_a.as_ref(), layout.window_id, layout.split_tab_id)
+            .unwrap();
+        mux.set_active_tab_for_client_view(view_b.as_ref(), layout.window_id, layout.split_tab_id)
+            .unwrap();
+        mux.set_active_pane_for_client_view(
+            view_a.as_ref(),
+            layout.window_id,
+            layout.split_tab_id,
+            layout.split_left_pane_id,
+        )
+        .unwrap();
+        mux.set_active_pane_for_client_view(
+            view_b.as_ref(),
+            layout.window_id,
+            layout.split_tab_id,
+            layout.split_left_pane_id,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            handler_a.request(&executor, Pdu::SetFocusedPane(SetFocusedPane {
+                pane_id: layout.split_right_pane_id,
+            })),
+            Pdu::UnitResponse(_)
+        ));
+
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(
+                view_a.as_ref(),
+                layout.window_id,
+                layout.split_tab_id,
+            ),
+            Some(layout.split_right_pane_id)
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(
+                view_b.as_ref(),
+                layout.window_id,
+                layout.split_tab_id,
+            ),
+            Some(layout.split_left_pane_id)
+        );
+    }
+
+    #[test]
+    fn list_panes_returns_requesting_clients_window_view_state() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let executor = SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let layout = build_test_layout(&mux);
+        let (_client_a, view_a, mut handler_a) = register_test_client(&mux, "view-a");
+        let (_client_b, view_b, mut handler_b) = register_test_client(&mux, "view-b");
+
+        mux.set_active_tab_for_client_view(view_a.as_ref(), layout.window_id, layout.right_tab_id)
+            .unwrap();
+        mux.set_active_tab_for_client_view(view_b.as_ref(), layout.window_id, layout.split_tab_id)
+            .unwrap();
+        mux.set_active_pane_for_client_view(
+            view_b.as_ref(),
+            layout.window_id,
+            layout.split_tab_id,
+            layout.split_right_pane_id,
+        )
+        .unwrap();
+
+        let response_a = match handler_a.request(&executor, Pdu::ListPanes(ListPanes {})) {
+            Pdu::ListPanesResponse(response) => response,
+            other => panic!("expected ListPanesResponse, got {:?}", other),
+        };
+        let response_b = match handler_b.request(&executor, Pdu::ListPanes(ListPanes {})) {
+            Pdu::ListPanesResponse(response) => response,
+            other => panic!("expected ListPanesResponse, got {:?}", other),
+        };
+
+        assert_eq!(
+            response_a.client_window_view_state.get(&layout.window_id),
+            Some(&ClientWindowViewState {
+                active_tab_id: Some(layout.right_tab_id),
+                last_active_tab_id: None,
+                tabs: HashMap::from([(
+                    layout.right_tab_id,
+                    ClientTabViewState {
+                        active_pane_id: Some(layout.right_pane_id),
+                    },
+                )]),
+            })
+        );
+        assert_eq!(
+            response_b.client_window_view_state.get(&layout.window_id),
+            Some(&ClientWindowViewState {
+                active_tab_id: Some(layout.split_tab_id),
+                last_active_tab_id: None,
+                tabs: HashMap::from([(
+                    layout.split_tab_id,
+                    ClientTabViewState {
+                        active_pane_id: Some(layout.split_right_pane_id),
+                    },
+                )]),
+            })
+        );
+    }
+
+    #[test]
+    fn set_client_active_tab_rejects_invalid_targets_cleanly() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let executor = SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let layout = build_test_layout(&mux);
+        let (_client_a, view_a, mut handler_a) = register_test_client(&mux, "view-a");
+        mux.set_active_tab_for_client_view(view_a.as_ref(), layout.window_id, layout.left_tab_id)
+            .unwrap();
+
+        let invalid_window = handler_a.request(
+            &executor,
+            Pdu::SetClientActiveTab(SetClientActiveTab {
+                window_id: layout.window_id + 999,
+                tab_id: layout.left_tab_id,
+            }),
+        );
+        let invalid_tab = handler_a.request(
+            &executor,
+            Pdu::SetClientActiveTab(SetClientActiveTab {
+                window_id: layout.window_id,
+                tab_id: layout.right_tab_id + 999,
+            }),
+        );
+
+        match invalid_window {
+            Pdu::ErrorResponse(ErrorResponse { reason }) => {
+                assert!(reason.contains("window"), "{}", reason);
+            }
+            other => panic!("expected ErrorResponse, got {:?}", other),
+        }
+        match invalid_tab {
+            Pdu::ErrorResponse(ErrorResponse { reason }) => {
+                assert!(reason.contains("tab"), "{}", reason);
+            }
+            other => panic!("expected ErrorResponse, got {:?}", other),
+        }
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_a.as_ref(), layout.window_id)
+                .map(|tab| tab.tab_id()),
+            Some(layout.left_tab_id)
+        );
+    }
 }

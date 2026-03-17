@@ -34,7 +34,7 @@ impl PaneSelector {
         // Ensure that we are un-zoomed and remember the original state
         let was_zoomed = {
             let mux = Mux::get();
-            mux.get_active_tab_for_window(term_window.mux_window_id)
+            mux.get_active_tab_for_window_for_current_identity(term_window.mux_window_id)
                 .map(|tab| tab.set_zoomed(false))
                 .unwrap_or(false)
         };
@@ -163,7 +163,7 @@ impl PaneSelector {
         term_window: &mut TermWindow,
     ) -> anyhow::Result<()> {
         let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(term_window.mux_window_id) {
+        let tab = match mux.get_active_tab_for_window_for_current_identity(term_window.mux_window_id) {
             Some(tab) => tab,
             None => return Ok(()),
         };

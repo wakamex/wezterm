@@ -579,7 +579,7 @@ impl ClientDomain {
             .copied()
             .collect();
 
-        let active_tabs = panes.active_tabs.clone();
+        let client_window_view_state = panes.client_window_view_state.clone();
 
         for (tabroot, tab_title) in panes.tabs.into_iter().zip(panes.tab_titles.iter()) {
             let root_size = match tabroot.root_size() {
@@ -722,20 +722,42 @@ impl ClientDomain {
             }
         }
 
-        for (remote_window_id, remote_tab_id) in active_tabs {
+        for (remote_window_id, window_view_state) in client_window_view_state {
+            let Some(remote_tab_id) = window_view_state.active_tab_id else {
+                continue;
+            };
             let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) else {
                 continue;
             };
             let Some(local_tab_id) = inner.remote_to_local_tab_id(remote_tab_id) else {
                 continue;
             };
-            let Some(mut window) = mux.get_window_mut(local_window_id) else {
+            if mux
+                .set_active_tab_for_current_identity(local_window_id, local_tab_id)
+                .is_err()
+            {
                 continue;
-            };
-            let Some(tab_idx) = window.idx_by_id(local_tab_id) else {
-                continue;
-            };
-            window.save_and_then_set_active(tab_idx);
+            }
+
+            if let Some(remote_active_pane_id) = window_view_state
+                .tabs
+                .get(&remote_tab_id)
+                .and_then(|tab_state| tab_state.active_pane_id)
+            {
+                if let Some(local_active_pane_id) = inner.remote_to_local_pane_id(remote_active_pane_id)
+                {
+                    let _ = mux.set_active_pane_for_current_identity(
+                        local_window_id,
+                        local_tab_id,
+                        local_active_pane_id,
+                    );
+                    if let Some(tab) = mux.get_tab(local_tab_id) {
+                        if let Some(pane) = mux.get_pane(local_active_pane_id) {
+                            tab.set_active_pane(&pane, mux::tab::NotifyMux::No);
+                        }
+                    }
+                }
+            }
         }
 
         // "Sweep" away our mapping for ids that are no longer present in the
@@ -1067,5 +1089,295 @@ impl Domain for ClientDomain {
         } else {
             DomainState::Detached
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use mux::tab::{PaneEntry, PaneNode, SerdeUrl};
+    use mux::client::{ClientId, ClientTabViewState, ClientViewId, ClientWindowViewState};
+    use mux::renderable::StableCursorPosition;
+    use mux::window::WindowId;
+    use mux::Mux;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use termwiz::surface::{CursorShape, CursorVisibility};
+    use wezterm_term::TerminalSize;
+
+    struct MuxGuard;
+
+    impl Drop for MuxGuard {
+        fn drop(&mut self) {
+            Mux::shutdown();
+        }
+    }
+
+    lazy_static::lazy_static! {
+        static ref TEST_MUX_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    }
+
+    fn size(cols: usize, rows: usize) -> TerminalSize {
+        TerminalSize {
+            cols,
+            rows,
+            pixel_width: cols * 8,
+            pixel_height: rows * 18,
+            dpi: 96,
+        }
+    }
+
+    fn leaf(
+        window_id: WindowId,
+        tab_id: TabId,
+        pane_id: PaneId,
+        pane_size: TerminalSize,
+        is_active_pane: bool,
+    ) -> PaneNode {
+        PaneNode::Leaf(PaneEntry {
+            window_id,
+            tab_id,
+            pane_id,
+            title: format!("pane-{pane_id}"),
+            size: pane_size,
+            working_dir: Some(SerdeUrl {
+                url: url::Url::from_file_path("/tmp").unwrap(),
+            }),
+            is_active_pane,
+            is_zoomed_pane: false,
+            workspace: "default".to_string(),
+            cursor_pos: StableCursorPosition {
+                x: 0,
+                y: 0,
+                shape: CursorShape::Default,
+                visibility: CursorVisibility::Visible,
+            },
+            physical_top: 0,
+            top_row: 0,
+            left_col: 0,
+            tty_name: None,
+        })
+    }
+
+    fn panes_response(
+        tabs: Vec<PaneNode>,
+        active_tab_id: TabId,
+        active_pane_id: PaneId,
+    ) -> ListPanesResponse {
+        ListPanesResponse {
+            tab_titles: tabs
+                .iter()
+                .map(|node| match node {
+                    PaneNode::Leaf(entry) => format!("tab-{}", entry.tab_id),
+                    _ => "tab".to_string(),
+                })
+                .collect(),
+            tabs,
+            window_titles: HashMap::from([(1, "remote-window".to_string())]),
+            client_window_view_state: HashMap::from([(
+                1,
+                ClientWindowViewState {
+                    active_tab_id: Some(active_tab_id),
+                    last_active_tab_id: None,
+                    tabs: HashMap::from([(
+                        active_tab_id,
+                        ClientTabViewState {
+                            active_pane_id: Some(active_pane_id),
+                        },
+                    )]),
+                },
+            )]),
+        }
+    }
+
+    fn make_dummy_client(
+        local_domain_id: DomainId,
+        view_name: &str,
+    ) -> (Arc<ClientId>, Arc<ClientViewId>, Client) {
+        let client_id = Arc::new(ClientId::new());
+        let view_id = Arc::new(ClientViewId(view_name.to_string()));
+        (
+            client_id.clone(),
+            view_id.clone(),
+            Client::new_for_test(
+                local_domain_id,
+                client_id.as_ref().clone(),
+                view_id.as_ref().clone(),
+            ),
+        )
+    }
+
+    fn install_client_domain(
+        mux: &Arc<Mux>,
+        view_name: &str,
+    ) -> (Arc<ClientDomain>, Arc<ClientInner>, Arc<ClientId>, Arc<ClientViewId>) {
+        let domain = Arc::new(ClientDomain::new(ClientDomainConfig::Unix(UnixDomain::default())));
+        mux.add_domain(&(domain.clone() as Arc<dyn Domain>));
+        let (client_id, view_id, client) = make_dummy_client(domain.local_domain_id, view_name);
+        mux.register_client(client_id.clone(), view_id.clone());
+        let inner = Arc::new(ClientInner::new(domain.local_domain_id, client, None, false));
+        *domain.inner.lock().unwrap() = Some(inner.clone());
+        (domain, inner, client_id, view_id)
+    }
+
+    fn apply_panes(
+        mux: &Arc<Mux>,
+        inner: Arc<ClientInner>,
+        client_id: Arc<ClientId>,
+        panes: ListPanesResponse,
+    ) {
+        let _identity = mux.with_identity(Some(client_id));
+        ClientDomain::process_pane_list(inner, panes, None).unwrap();
+    }
+
+    #[test]
+    fn mirrored_domains_keep_active_tabs_divergent_across_reconcile_lifecycle() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let (_domain_a, inner_a, client_a, view_a) = install_client_domain(&mux, "view-a");
+        let (_domain_b, inner_b, client_b, view_b) = install_client_domain(&mux, "view-b");
+
+        let tab_a = leaf(1, 101, 1001, size(120, 40), true);
+        let tab_b = leaf(1, 102, 1002, size(120, 40), true);
+
+        apply_panes(
+            &mux,
+            inner_a.clone(),
+            client_a.clone(),
+            panes_response(vec![tab_a.clone(), tab_b.clone()], 101, 1001),
+        );
+        apply_panes(
+            &mux,
+            inner_b.clone(),
+            client_b.clone(),
+            panes_response(vec![tab_a.clone(), tab_b.clone()], 102, 1002),
+        );
+
+        let local_window_a = inner_a.remote_to_local_window(1).unwrap();
+        let local_window_b = inner_b.remote_to_local_window(1).unwrap();
+        let local_tab_a_101 = inner_a.remote_to_local_tab_id(101).unwrap();
+        let local_tab_a_102 = inner_a.remote_to_local_tab_id(102).unwrap();
+        let local_tab_b_101 = inner_b.remote_to_local_tab_id(101).unwrap();
+        let local_tab_b_102 = inner_b.remote_to_local_tab_id(102).unwrap();
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_a.as_ref(), local_window_a)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_a_101)
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(
+                view_a.as_ref(),
+                local_window_a,
+                local_tab_a_101,
+            ),
+            inner_a.remote_to_local_pane_id(1001)
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_b.as_ref(), local_window_b)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_b_102)
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(
+                view_b.as_ref(),
+                local_window_b,
+                local_tab_b_102,
+            ),
+            inner_b.remote_to_local_pane_id(1002)
+        );
+
+        apply_panes(
+            &mux,
+            inner_a.clone(),
+            client_a.clone(),
+            panes_response(vec![tab_a.clone(), tab_b.clone()], 101, 1001),
+        );
+        apply_panes(
+            &mux,
+            inner_b.clone(),
+            client_b.clone(),
+            panes_response(vec![tab_a.clone(), tab_b.clone()], 102, 1002),
+        );
+
+        assert_eq!(inner_a.remote_to_local_tab_id(101), Some(local_tab_a_101));
+        assert_eq!(inner_a.remote_to_local_tab_id(102), Some(local_tab_a_102));
+        assert_eq!(inner_b.remote_to_local_tab_id(101), Some(local_tab_b_101));
+        assert_eq!(inner_b.remote_to_local_tab_id(102), Some(local_tab_b_102));
+
+        let tab_c = leaf(1, 103, 1003, size(120, 40), true);
+        apply_panes(
+            &mux,
+            inner_a.clone(),
+            client_a.clone(),
+            panes_response(vec![tab_a.clone(), tab_b.clone(), tab_c.clone()], 103, 1003),
+        );
+        apply_panes(
+            &mux,
+            inner_b.clone(),
+            client_b.clone(),
+            panes_response(vec![tab_a.clone(), tab_b.clone(), tab_c.clone()], 102, 1002),
+        );
+
+        let local_tab_a_103 = inner_a.remote_to_local_tab_id(103).unwrap();
+        let local_tab_b_103 = inner_b.remote_to_local_tab_id(103).unwrap();
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_a.as_ref(), local_window_a)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_a_103)
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_b.as_ref(), local_window_b)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_b_102)
+        );
+        assert_eq!(mux.get_tab(local_tab_a_103).is_some(), true);
+        assert_eq!(mux.get_tab(local_tab_b_103).is_some(), true);
+
+        apply_panes(
+            &mux,
+            inner_a.clone(),
+            client_a.clone(),
+            panes_response(vec![tab_a.clone(), tab_c.clone()], 103, 1003),
+        );
+        apply_panes(
+            &mux,
+            inner_b.clone(),
+            client_b.clone(),
+            panes_response(vec![tab_a, tab_c], 101, 1001),
+        );
+
+        assert_eq!(inner_a.remote_to_local_tab_id(102), None);
+        assert_eq!(inner_b.remote_to_local_tab_id(102), None);
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_a.as_ref(), local_window_a)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_a_103)
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_b.as_ref(), local_window_b)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_b_101)
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(
+                view_a.as_ref(),
+                local_window_a,
+                local_tab_a_103,
+            ),
+            inner_a.remote_to_local_pane_id(1003)
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(
+                view_b.as_ref(),
+                local_window_b,
+                local_tab_b_101,
+            ),
+            inner_b.remote_to_local_pane_id(1001)
+        );
     }
 }

@@ -15,7 +15,7 @@ pub fn confirm_close_pane(
     if confirm::run_confirmation("🛑 Really kill this pane?", &mut term)? {
         promise::spawn::spawn_into_main_thread(async move {
             let mux = Mux::get();
-            let tab = match mux.get_active_tab_for_window(mux_window_id) {
+            let tab = match mux.get_active_tab_for_window_for_current_identity(mux_window_id) {
                 Some(tab) => tab,
                 None => return,
             };

@@ -261,7 +261,7 @@ impl super::TermWindow {
         context: &dyn WindowOps,
     ) {
         let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match mux.get_active_tab_for_window_for_current_identity(self.mux_window_id) {
             Some(tab) => tab,
             None => return,
         };
@@ -679,7 +679,7 @@ impl super::TermWindow {
                     match &event.kind {
                         WMEK::Press(_) => {
                             let mux = Mux::get();
-                            mux.get_active_tab_for_window(self.mux_window_id)
+                            mux.get_active_tab_for_window_for_current_identity(self.mux_window_id)
                                 .map(|tab| tab.set_active_idx(pos.index));
 
                             pane = Arc::clone(&pos.pane);
@@ -688,7 +688,7 @@ impl super::TermWindow {
                         WMEK::Move => {
                             if self.config.pane_focus_follows_mouse {
                                 let mux = Mux::get();
-                                mux.get_active_tab_for_window(self.mux_window_id)
+                                mux.get_active_tab_for_window_for_current_identity(self.mux_window_id)
                                     .map(|tab| tab.set_active_idx(pos.index));
 
                                 pane = Arc::clone(&pos.pane);

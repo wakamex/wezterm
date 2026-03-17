@@ -143,7 +143,7 @@ impl SavedLayout {
             tabs,
             tab_titles,
             window_titles,
-            active_tabs,
+            client_window_view_state,
         } = response;
 
         let mut windows = Vec::new();
@@ -173,9 +173,23 @@ impl SavedLayout {
                     active_tab_index: 0,
                     tabs: vec![saved_tab],
                 });
+                if client_window_view_state
+                    .get(&window_id)
+                    .and_then(|window_state| window_state.active_tab_id)
+                    == Some(tab_id)
+                {
+                    windows
+                        .last_mut()
+                        .expect("window was just pushed")
+                        .active_tab_index = 0;
+                }
                 current_window_id = Some(window_id);
             } else if let Some(window) = windows.last_mut() {
-                if active_tabs.get(&window_id).copied() == Some(tab_id) {
+                if client_window_view_state
+                    .get(&window_id)
+                    .and_then(|window_state| window_state.active_tab_id)
+                    == Some(tab_id)
+                {
                     window.active_tab_index = window.tabs.len();
                 }
                 window.tabs.push(saved_tab);
@@ -526,7 +540,22 @@ mod test {
                 (1, "win-a".into()),
                 (9, "win-b".into()),
             ]),
-            active_tabs: std::collections::HashMap::from([(1, 3), (9, 4)]),
+            client_window_view_state: std::collections::HashMap::from([
+                (
+                    1,
+                    mux::client::ClientWindowViewState {
+                        active_tab_id: Some(3),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    9,
+                    mux::client::ClientWindowViewState {
+                        active_tab_id: Some(4),
+                        ..Default::default()
+                    },
+                ),
+            ]),
         };
 
         let layout = SavedLayout::from_list_panes(response).unwrap();

@@ -480,11 +480,14 @@ async fn async_run_terminal_gui(
                     window_id,
                 )
                 .await?;
-            let mut window = mux
-                .get_window_mut(window_id)
+            let window = mux
+                .get_window(window_id)
                 .ok_or_else(|| anyhow!("failed to get mux window id {window_id}"))?;
-            if let Some(tab_idx) = window.idx_by_id(tab.tab_id()) {
-                window.set_active_without_saving(tab_idx);
+            if window.idx_by_id(tab.tab_id()).is_some() {
+                drop(window);
+                mux.set_active_tab_for_current_identity(window_id, tab.tab_id())?;
+            } else {
+                drop(window);
             }
             trigger_and_log_gui_attached(MuxDomain(domain.domain_id())).await;
         }
@@ -690,7 +693,8 @@ fn setup_mux(
     let mux = Arc::new(mux::Mux::new(Some(local_domain.clone())));
     Mux::set_mux(&mux);
     let client_id = Arc::new(mux::client::ClientId::new());
-    mux.register_client(client_id.clone());
+    let view_id = Arc::new(mux::client::ClientViewId::persistent());
+    mux.register_client(client_id.clone(), view_id);
     mux.replace_identity(Some(client_id));
     let default_workspace_name = default_workspace_name.unwrap_or(
         config

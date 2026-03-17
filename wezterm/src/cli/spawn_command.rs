@@ -213,7 +213,7 @@ mod test {
             tabs,
             tab_titles: vec![],
             window_titles: HashMap::new(),
-            active_tabs: HashMap::new(),
+            client_window_view_state: HashMap::new(),
         }
     }
 
