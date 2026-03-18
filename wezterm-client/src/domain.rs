@@ -6,7 +6,7 @@ use codec::{ListPanesResponse, SpawnV2, SplitPane};
 use config::keyassignment::SpawnTabDomain;
 use config::{SshDomain, TlsDomainClient, UnixDomain};
 use mux::connui::{ConnectionUI, ConnectionUIParams};
-use mux::domain::{alloc_domain_id, Domain, DomainId, DomainState, SplitSource};
+use mux::domain::{Domain, DomainId, DomainState, SplitSource, alloc_domain_id};
 use mux::pane::{Pane, PaneId};
 use mux::tab::{SplitRequest, Tab, TabId};
 use mux::window::WindowId;
@@ -448,6 +448,27 @@ impl ClientDomain {
         inner.local_to_remote_tab(local_tab_id)
     }
 
+    fn spawn_target_for_window(
+        mux: &Mux,
+        inner: &ClientInner,
+        window: WindowId,
+    ) -> (Option<WindowId>, Option<PaneId>) {
+        let remote_window_id = inner.local_to_remote_window(window);
+        let remote_pane_id = mux
+            .get_active_pane_for_window_for_current_identity(window)
+            .and_then(|pane| {
+                pane.downcast_ref::<ClientPane>()
+                    .map(|pane| pane.remote_pane_id())
+            });
+
+        match (remote_window_id, remote_pane_id) {
+            (Some(remote_window_id), Some(remote_pane_id)) => {
+                (Some(remote_window_id), Some(remote_pane_id))
+            }
+            _ => (None, None),
+        }
+    }
+
     pub fn get_client_inner_for_domain(domain_id: DomainId) -> anyhow::Result<Arc<ClientInner>> {
         let mux = Mux::get();
         let domain = mux
@@ -513,10 +534,7 @@ impl ClientDomain {
             if !self.resync_pending.swap(false, Ordering::AcqRel) {
                 break;
             }
-            log::trace!(
-                "domain {} running pending resync",
-                self.local_domain_id
-            );
+            log::trace!("domain {} running pending resync", self.local_domain_id);
         }
 
         self.resync_in_progress.store(false, Ordering::Release);
@@ -581,11 +599,7 @@ impl ClientDomain {
 
         let client_window_view_state = panes.client_window_view_state.clone();
 
-        for (tabroot, tab_title) in panes
-            .tabs
-            .into_iter()
-            .zip(panes.display_tab_titles.iter())
-        {
+        for (tabroot, tab_title) in panes.tabs.into_iter().zip(panes.display_tab_titles.iter()) {
             let root_size = match tabroot.root_size() {
                 Some(size) => size,
                 None => continue,
@@ -748,7 +762,8 @@ impl ClientDomain {
                 .get(&remote_tab_id)
                 .and_then(|tab_state| tab_state.active_pane_id)
             {
-                if let Some(local_active_pane_id) = inner.remote_to_local_pane_id(remote_active_pane_id)
+                if let Some(local_active_pane_id) =
+                    inner.remote_to_local_pane_id(remote_active_pane_id)
                 {
                     let _ = mux.set_active_pane_for_current_identity(
                         local_window_id,
@@ -911,19 +926,23 @@ impl Domain for ClientDomain {
             .inner()
             .ok_or_else(|| anyhow!("domain is not attached"))?;
 
-        let workspace = Mux::get().active_workspace();
-        let local_pane = Mux::get()
-            .get_active_pane_for_window_for_current_identity(window)
-            .ok_or_else(|| anyhow!("window {} has no active pane for this client", window))?;
-        let pane = local_pane
-            .downcast_ref::<ClientPane>()
-            .ok_or_else(|| anyhow!("active pane for window {} is not a ClientPane", window))?;
+        let mux = Mux::get();
+        let workspace = mux.active_workspace();
+        let (remote_window_id, remote_current_pane_id) =
+            Self::spawn_target_for_window(&mux, inner.as_ref(), window);
+        if remote_current_pane_id.is_none() {
+            log::info!(
+                "domain {} spawn in local window {} has no active ClientPane; creating a new remote window",
+                self.local_domain_id,
+                window
+            );
+        }
         let result = inner
             .client
             .spawn_v2(SpawnV2 {
                 domain: SpawnTabDomain::DefaultDomain,
-                window_id: inner.local_to_remote_window(window),
-                current_pane_id: Some(pane.remote_pane_id),
+                window_id: remote_window_id,
+                current_pane_id: remote_current_pane_id,
                 size,
                 command,
                 command_dir,
@@ -1106,14 +1125,14 @@ impl Domain for ClientDomain {
 #[cfg(test)]
 mod test {
     use super::*;
-    use mux::tab::{PaneEntry, PaneNode, SerdeUrl};
+    use mux::Mux;
     use mux::client::{ClientId, ClientTabViewState, ClientViewId, ClientWindowViewState};
     use mux::renderable::StableCursorPosition;
+    use mux::tab::{PaneEntry, PaneNode, SerdeUrl};
     use mux::window::WindowId;
-    use mux::Mux;
     use std::collections::HashMap;
-    use std::sync::Once;
     use std::sync::Arc;
+    use std::sync::Once;
     use termwiz::surface::{CursorShape, CursorVisibility};
     use wezterm_term::TerminalSize;
 
@@ -1237,12 +1256,24 @@ mod test {
     fn install_client_domain(
         mux: &Arc<Mux>,
         view_name: &str,
-    ) -> (Arc<ClientDomain>, Arc<ClientInner>, Arc<ClientId>, Arc<ClientViewId>) {
-        let domain = Arc::new(ClientDomain::new(ClientDomainConfig::Unix(UnixDomain::default())));
+    ) -> (
+        Arc<ClientDomain>,
+        Arc<ClientInner>,
+        Arc<ClientId>,
+        Arc<ClientViewId>,
+    ) {
+        let domain = Arc::new(ClientDomain::new(ClientDomainConfig::Unix(
+            UnixDomain::default(),
+        )));
         mux.add_domain(&(domain.clone() as Arc<dyn Domain>));
         let (client_id, view_id, client) = make_dummy_client(domain.local_domain_id, view_name);
         mux.register_client(client_id.clone(), view_id.clone());
-        let inner = Arc::new(ClientInner::new(domain.local_domain_id, client, None, false));
+        let inner = Arc::new(ClientInner::new(
+            domain.local_domain_id,
+            client,
+            None,
+            false,
+        ));
         *domain.inner.lock().unwrap() = Some(inner.clone());
         (domain, inner, client_id, view_id)
     }
@@ -1443,5 +1474,47 @@ mod test {
                 .map(|pane| pane.pane_id()),
             Some(local_pane_id)
         );
+    }
+
+    #[test]
+    fn spawn_target_for_window_uses_active_client_pane_when_present() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        ensure_test_executor();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let (_domain, inner, client_id, _view_id) = install_client_domain(&mux, "spawn-source");
+
+        let tab = leaf(1, 101, 1001, size(120, 40), true);
+        apply_panes(
+            &mux,
+            inner.clone(),
+            client_id.clone(),
+            panes_response(vec![tab], 101, 1001),
+        );
+
+        let local_window_id = inner.remote_to_local_window(1).unwrap();
+        let _identity = mux.with_identity(Some(client_id));
+        let target = ClientDomain::spawn_target_for_window(&mux, inner.as_ref(), local_window_id);
+
+        assert_eq!(target, (Some(1), Some(1001)));
+    }
+
+    #[test]
+    fn spawn_target_for_window_falls_back_to_new_remote_window_without_client_pane() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        ensure_test_executor();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let (_domain, inner, client_id, _view_id) = install_client_domain(&mux, "spawn-empty");
+        let local_window_id = *mux.new_empty_window(Some("default".to_string()), None);
+
+        let _identity = mux.with_identity(Some(client_id));
+        let target = ClientDomain::spawn_target_for_window(&mux, inner.as_ref(), local_window_id);
+
+        assert_eq!(target, (None, None));
     }
 }
