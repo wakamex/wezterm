@@ -819,19 +819,16 @@ impl Mux {
     }
 
     fn agent_tab_badge_mode() -> AgentTabBadgeMode {
-        match std::env::var("WEZTERM_AGENT_TAB_BADGE_MODE")
-            .ok()
-            .as_deref()
-        {
-            Some("off") => AgentTabBadgeMode::Off,
-            Some("turn") => AgentTabBadgeMode::Turn,
-            Some("attention") | None => AgentTabBadgeMode::Attention,
-            Some(_) => AgentTabBadgeMode::Attention,
+        match configuration().agent_tab_badge_mode.as_str() {
+            "off" => AgentTabBadgeMode::Off,
+            "turn" => AgentTabBadgeMode::Turn,
+            "attention" => AgentTabBadgeMode::Attention,
+            _ => AgentTabBadgeMode::Attention,
         }
     }
 
     fn agent_tab_badge_text() -> Option<String> {
-        let badge = std::env::var("WEZTERM_AGENT_TAB_BADGE").unwrap_or_else(|_| "🤖 ".to_string());
+        let badge = configuration().agent_tab_badge.clone();
         if badge.is_empty() { None } else { Some(badge) }
     }
 
@@ -840,7 +837,7 @@ impl Mux {
         loop {
             let mut changed = false;
             for badge in IntoIterator::into_iter([
-                std::env::var("WEZTERM_AGENT_TAB_BADGE").ok(),
+                Some(configuration().agent_tab_badge.clone()),
                 Some("🤖 ".to_string()),
             ])
             .flatten()
@@ -1160,6 +1157,9 @@ impl Mux {
             .ok_or_else(|| anyhow::anyhow!("can't find {pane_id} in the mux"))?;
 
         self.set_active_pane_for_current_identity(window_id, tab_id, pane_id)?;
+        if let Some(view_id) = self.active_view_id() {
+            self.acknowledge_agent_attention_for_view(view_id.as_ref(), pane_id);
+        }
 
         // Focus/activate the pane locally
         let tab = self
@@ -2808,6 +2808,24 @@ mod test {
         }
     }
 
+    struct TestConfigGuard;
+
+    impl TestConfigGuard {
+        fn new(mode: &str, badge: &str) -> Self {
+            let mut config = config::Config::default();
+            config.agent_tab_badge_mode = mode.to_string();
+            config.agent_tab_badge = badge.to_string();
+            config::use_this_configuration(config);
+            Self
+        }
+    }
+
+    impl Drop for TestConfigGuard {
+        fn drop(&mut self) {
+            config::use_test_configuration();
+        }
+    }
+
     #[test]
     fn agent_metadata_is_listed_and_cleared_when_pane_is_removed() {
         let _test_lock = TEST_MUX_LOCK.lock();
@@ -2894,6 +2912,7 @@ mod test {
     fn effective_tab_title_badges_tabs_waiting_on_user() {
         let _test_lock = TEST_MUX_LOCK.lock();
         let _executor = promise::spawn::SimpleExecutor::new();
+        config::use_test_configuration();
         let domain = Arc::new(FakeDomain::new());
         let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
         Mux::set_mux(&mux);
@@ -2926,33 +2945,61 @@ mod test {
                 Some(Utc.with_ymd_and_hms(2026, 3, 18, 12, 0, 0).unwrap());
         }
 
-        unsafe {
-            std::env::set_var("WEZTERM_AGENT_TAB_BADGE_MODE", "turn");
-        }
+        let _config = TestConfigGuard::new("turn", "🤖 ");
         assert_eq!(mux.effective_tab_title(tab.tab_id()), "🤖 scrape");
+    }
 
-        unsafe {
-            std::env::set_var("WEZTERM_AGENT_TAB_BADGE", "");
+    #[test]
+    fn effective_tab_title_hides_badge_when_configured_empty() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        config::use_test_configuration();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        tab.set_title("🤖 scrape");
+        let pane = FakePane::new(143, size, domain.id);
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_agent_metadata(pane_id, sample_agent_metadata("scraper"))
+            .unwrap();
+
+        {
+            let mut runtime_by_pane = mux.agent_runtime_by_pane.write();
+            let runtime = runtime_by_pane.get_mut(&pane_id).unwrap();
+            runtime.turn_state = crate::agent::AgentTurnState::WaitingOnUser;
+            runtime.last_turn_completed_at =
+                Some(Utc.with_ymd_and_hms(2026, 3, 18, 12, 0, 0).unwrap());
         }
+
+        let _config = TestConfigGuard::new("turn", "");
         assert_eq!(mux.effective_tab_title(tab.tab_id()), "scrape");
-        unsafe {
-            std::env::remove_var("WEZTERM_AGENT_TAB_BADGE");
-            std::env::remove_var("WEZTERM_AGENT_TAB_BADGE_MODE");
-        }
     }
 
     #[test]
     fn attention_badge_clears_only_for_view_that_focuses_agent() {
         let _test_lock = TEST_MUX_LOCK.lock();
         let _executor = promise::spawn::SimpleExecutor::new();
+        config::use_test_configuration();
         let domain = Arc::new(FakeDomain::new());
         let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
         Mux::set_mux(&mux);
         let _guard = TestMuxGuard;
-
-        unsafe {
-            std::env::set_var("WEZTERM_AGENT_TAB_BADGE_MODE", "attention");
-        }
+        let _config = TestConfigGuard::new("attention", "🤖 ");
 
         let size = TerminalSize {
             rows: 24,
@@ -3016,10 +3063,64 @@ mod test {
             mux.effective_tab_title_for_view(view_b.as_ref(), tab.tab_id()),
             "🤖 scrape"
         );
+    }
 
-        unsafe {
-            std::env::remove_var("WEZTERM_AGENT_TAB_BADGE_MODE");
+    #[test]
+    fn attention_badge_clears_for_current_identity_focus_path() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        config::use_test_configuration();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+        let _config = TestConfigGuard::new("attention", "🤖 ");
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        tab.set_title("scrape");
+        let pane = FakePane::new(144, size, domain.id);
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_agent_metadata(pane_id, sample_agent_metadata("scraper"))
+            .unwrap();
+
+        {
+            let mut runtime_by_pane = mux.agent_runtime_by_pane.write();
+            let runtime = runtime_by_pane.get_mut(&pane_id).unwrap();
+            runtime.turn_state = crate::agent::AgentTurnState::WaitingOnUser;
+            runtime.last_turn_completed_at =
+                Some(Utc.with_ymd_and_hms(2026, 3, 18, 13, 0, 0).unwrap());
         }
+
+        let (client_id, view_id) = register_test_client(&mux, "focus-view");
+        mux.set_active_tab_for_client_view(view_id.as_ref(), window_id, tab.tab_id())
+            .unwrap();
+        mux.set_active_pane_for_client_view(view_id.as_ref(), window_id, tab.tab_id(), pane_id)
+            .unwrap();
+
+        assert_eq!(
+            mux.effective_tab_title_for_view(view_id.as_ref(), tab.tab_id()),
+            "🤖 scrape"
+        );
+
+        let _identity = mux.with_identity(Some(client_id));
+        mux.focus_pane_and_containing_tab(pane_id).unwrap();
+
+        assert_eq!(
+            mux.effective_tab_title_for_view(view_id.as_ref(), tab.tab_id()),
+            "scrape"
+        );
     }
 
     #[test]
