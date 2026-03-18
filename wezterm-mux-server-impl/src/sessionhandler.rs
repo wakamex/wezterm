@@ -245,6 +245,12 @@ impl SessionHandler {
         false
     }
 
+    pub fn tab_title_for_client(&self, tab_id: TabId) -> String {
+        let mux = Mux::get();
+        let _identity = mux.with_identity(self.client_id.clone());
+        mux.effective_tab_title(tab_id)
+    }
+
     pub(crate) fn per_pane(&mut self, pane_id: PaneId) -> Arc<Mutex<PerPane>> {
         Arc::clone(
             self.per_pane

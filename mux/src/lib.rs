@@ -1,19 +1,20 @@
 use crate::agent::{
-    derive_runtime_status, infer_harness, prime_runtime_for_new_agent,
-    refresh_runtime_from_harness, AgentMetadata, AgentRuntimeSnapshot, AgentSnapshot,
+    AgentMetadata, AgentRuntimeSnapshot, AgentSnapshot, derive_runtime_status, infer_harness,
+    prime_runtime_for_new_agent, refresh_runtime_from_harness,
 };
 use crate::client::{ClientId, ClientInfo, ClientViewId, ClientViewState, ClientWindowViewState};
 use crate::pane::{CachePolicy, Pane, PaneId};
 use crate::ssh_agent::AgentProxy;
 use crate::tab::{NotifyMux, SplitRequest, Tab, TabId};
 use crate::window::{Window, WindowId};
-use anyhow::{anyhow, Context, Error};
+use anyhow::{Context, Error, anyhow};
+use chrono::{DateTime, Utc};
 use config::keyassignment::SpawnTabDomain;
-use config::{configuration, ExitBehavior, GuiPosition};
+use config::{ExitBehavior, GuiPosition, configuration};
 use domain::{Domain, DomainId, DomainState, SplitSource};
-use filedescriptor::{poll, pollfd, socketpair, AsRawSocketDescriptor, FileDescriptor, POLLIN};
+use filedescriptor::{AsRawSocketDescriptor, FileDescriptor, POLLIN, poll, pollfd, socketpair};
 #[cfg(unix)]
-use libc::{c_int, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
+use libc::{SO_RCVBUF, SO_SNDBUF, SOL_SOCKET, c_int};
 use log::error;
 use metrics::histogram;
 use parking_lot::{
@@ -35,7 +36,7 @@ use termwiz::escape::{Action, CSI};
 use thiserror::*;
 use wezterm_term::{Clipboard, ClipboardSelection, DownloadHandler, TerminalSize};
 #[cfg(windows)]
-use winapi::um::winsock2::{SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
+use winapi::um::winsock2::{SO_RCVBUF, SO_SNDBUF, SOL_SOCKET};
 
 pub mod activity;
 pub mod agent;
@@ -111,6 +112,7 @@ pub struct Mux {
     agent_panes_by_name: RwLock<HashMap<String, PaneId>>,
     agent_metadata_by_pane: RwLock<HashMap<PaneId, Arc<AgentMetadata>>>,
     agent_runtime_by_pane: RwLock<HashMap<PaneId, AgentRuntimeSnapshot>>,
+    agent_attention_seen_by_view: RwLock<HashMap<ClientViewId, HashMap<PaneId, DateTime<Utc>>>>,
     windows: RwLock<HashMap<WindowId, Window>>,
     default_domain: RwLock<Option<Arc<dyn Domain>>>,
     domains: RwLock<HashMap<DomainId, Arc<dyn Domain>>>,
@@ -126,6 +128,13 @@ pub struct Mux {
 }
 
 const BUFSIZE: usize = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentTabBadgeMode {
+    Attention,
+    Turn,
+    Off,
+}
 
 /// This function applies parsed actions to the pane and notifies any
 /// mux subscribers about the output event
@@ -465,6 +474,7 @@ impl Mux {
             agent_panes_by_name: RwLock::new(HashMap::new()),
             agent_metadata_by_pane: RwLock::new(HashMap::new()),
             agent_runtime_by_pane: RwLock::new(HashMap::new()),
+            agent_attention_seen_by_view: RwLock::new(HashMap::new()),
             windows: RwLock::new(HashMap::new()),
             default_domain: RwLock::new(default_domain),
             domains_by_name: RwLock::new(domains_by_name),
@@ -596,6 +606,9 @@ impl Mux {
             .write()
             .remove(&pane_id)
             .unwrap_or_else(|| AgentRuntimeSnapshot::new(&metadata));
+        for seen in self.agent_attention_seen_by_view.write().values_mut() {
+            seen.remove(&pane_id);
+        }
         runtime.alive = alive;
         runtime.foreground_process_name = foreground_process_name.clone();
         runtime.tty_name = tty_name;
@@ -624,6 +637,9 @@ impl Mux {
         };
         self.agent_panes_by_name.write().remove(&metadata.name);
         self.agent_runtime_by_pane.write().remove(&pane_id);
+        for seen in self.agent_attention_seen_by_view.write().values_mut() {
+            seen.remove(&pane_id);
+        }
         if let Some(tab_id) = tab_id {
             self.notify_tab_title_if_changed(tab_id, old_tab_title);
         }
@@ -734,13 +750,89 @@ impl Mux {
         }
     }
 
+    fn agent_attention_seen_at_for_view(
+        &self,
+        view_id: &ClientViewId,
+        pane_id: PaneId,
+    ) -> Option<DateTime<Utc>> {
+        self.agent_attention_seen_by_view
+            .read()
+            .get(view_id)
+            .and_then(|seen| seen.get(&pane_id).copied())
+    }
+
+    fn acknowledge_agent_attention_for_view(&self, view_id: &ClientViewId, pane_id: PaneId) {
+        let Some((_domain_id, _window_id, tab_id)) = self.resolve_pane_id(pane_id) else {
+            return;
+        };
+        let Some(completed_at) = self
+            .agent_runtime_by_pane
+            .read()
+            .get(&pane_id)
+            .and_then(|runtime| runtime.last_turn_completed_at)
+        else {
+            return;
+        };
+
+        let previous = self.effective_tab_title_for_view(view_id, tab_id);
+        self.agent_attention_seen_by_view
+            .write()
+            .entry(view_id.clone())
+            .or_default()
+            .insert(pane_id, completed_at);
+        let current = self.effective_tab_title_for_view(view_id, tab_id);
+        if previous != current {
+            self.notify(MuxNotification::TabTitleChanged {
+                tab_id,
+                title: current,
+            });
+        }
+    }
+
+    fn agent_turn_needs_attention_for_view(
+        &self,
+        view_id: &ClientViewId,
+        pane_id: PaneId,
+        runtime: &AgentRuntimeSnapshot,
+    ) -> bool {
+        if !matches!(
+            runtime.turn_state,
+            crate::agent::AgentTurnState::WaitingOnUser
+        ) {
+            return false;
+        }
+
+        let Some(completed_at) = runtime.last_turn_completed_at else {
+            return false;
+        };
+
+        self.agent_attention_seen_at_for_view(view_id, pane_id)
+            .map(|seen_at| seen_at < completed_at)
+            .unwrap_or(true)
+    }
+
+    fn agent_waiting_on_user(runtime: &AgentRuntimeSnapshot) -> bool {
+        matches!(
+            runtime.turn_state,
+            crate::agent::AgentTurnState::WaitingOnUser
+        )
+    }
+
+    fn agent_tab_badge_mode() -> AgentTabBadgeMode {
+        match std::env::var("WEZTERM_AGENT_TAB_BADGE_MODE")
+            .ok()
+            .as_deref()
+        {
+            Some("off") => AgentTabBadgeMode::Off,
+            Some("turn") => AgentTabBadgeMode::Turn,
+            Some("attention") | None => AgentTabBadgeMode::Attention,
+            Some(_) => AgentTabBadgeMode::Attention,
+        }
+    }
+
     fn agent_tab_badge_text() -> Option<String> {
         let badge = std::env::var("WEZTERM_AGENT_TAB_BADGE").unwrap_or_else(|_| "🤖 ".to_string());
-        if badge.is_empty() {
-            None
-        } else {
-            Some(badge)
-        }
+        if badge.is_empty() { None } else { Some(badge) }
     }
 
     pub fn sanitize_tab_title_text(title: &str) -> String {
@@ -773,10 +865,14 @@ impl Mux {
             .unwrap_or_default()
     }
 
-    fn should_badge_tab_for_agents(&self, tab_id: TabId) -> bool {
+    fn should_badge_tab_for_agents(&self, tab_id: TabId, view_id: Option<&ClientViewId>) -> bool {
         let Some(tab) = self.get_tab(tab_id) else {
             return false;
         };
+        let badge_mode = Self::agent_tab_badge_mode();
+        if matches!(badge_mode, AgentTabBadgeMode::Off) {
+            return false;
+        }
         let runtime_by_pane = self.agent_runtime_by_pane.read();
         for positioned in tab.iter_panes_ignoring_zoom() {
             let pane_id = positioned.pane.pane_id();
@@ -785,11 +881,15 @@ impl Mux {
             }
             if runtime_by_pane
                 .get(&pane_id)
-                .map(|runtime| {
-                    matches!(
-                        runtime.turn_state,
-                        crate::agent::AgentTurnState::WaitingOnUser
-                    )
+                .map(|runtime| match badge_mode {
+                    AgentTabBadgeMode::Off => false,
+                    AgentTabBadgeMode::Turn => Self::agent_waiting_on_user(runtime),
+                    AgentTabBadgeMode::Attention => match view_id {
+                        Some(view_id) => {
+                            self.agent_turn_needs_attention_for_view(view_id, pane_id, runtime)
+                        }
+                        None => Self::agent_waiting_on_user(runtime),
+                    },
                 })
                 .unwrap_or(false)
             {
@@ -799,14 +899,29 @@ impl Mux {
         false
     }
 
-    pub fn effective_tab_title(&self, tab_id: TabId) -> String {
+    pub fn effective_tab_title_for_view(&self, view_id: &ClientViewId, tab_id: TabId) -> String {
         let base_title = self.raw_tab_title(tab_id);
-        if self.should_badge_tab_for_agents(tab_id) {
+        if self.should_badge_tab_for_agents(tab_id, Some(view_id)) {
             if let Some(badge) = Self::agent_tab_badge_text() {
                 return format!("{badge}{base_title}");
             }
         }
         base_title
+    }
+
+    pub fn effective_tab_title(&self, tab_id: TabId) -> String {
+        match self.active_view_id() {
+            Some(view_id) => self.effective_tab_title_for_view(view_id.as_ref(), tab_id),
+            None => {
+                let base_title = self.raw_tab_title(tab_id);
+                if self.should_badge_tab_for_agents(tab_id, None) {
+                    if let Some(badge) = Self::agent_tab_badge_text() {
+                        return format!("{badge}{base_title}");
+                    }
+                }
+                base_title
+            }
+        }
     }
 
     fn runtime_snapshot_for_agent(
@@ -1016,6 +1131,7 @@ impl Mux {
         {
             let _ =
                 self.set_active_pane_for_client_view(view_id.as_ref(), window_id, tab_id, pane_id);
+            self.acknowledge_agent_attention_for_view(view_id.as_ref(), pane_id);
         }
 
         if prior == Some(pane_id) {
@@ -2283,8 +2399,9 @@ impl wezterm_term::DownloadHandler for MuxDownloader {
 mod test {
     use super::*;
     use crate::agent::AgentMetadata;
-    use crate::domain::{alloc_domain_id, Domain, DomainId, DomainState};
-    use crate::pane::{alloc_pane_id, CachePolicy, ForEachPaneLogicalLine, Pane, WithPaneLines};
+    use crate::client::{ClientId, ClientViewId};
+    use crate::domain::{Domain, DomainId, DomainState, alloc_domain_id};
+    use crate::pane::{CachePolicy, ForEachPaneLogicalLine, Pane, WithPaneLines, alloc_pane_id};
     use crate::renderable::{RenderableDimensions, StableCursorPosition};
     use anyhow::Error;
     use async_trait::async_trait;
@@ -2805,8 +2922,13 @@ mod test {
             let mut runtime_by_pane = mux.agent_runtime_by_pane.write();
             let runtime = runtime_by_pane.get_mut(&pane_id).unwrap();
             runtime.turn_state = crate::agent::AgentTurnState::WaitingOnUser;
+            runtime.last_turn_completed_at =
+                Some(Utc.with_ymd_and_hms(2026, 3, 18, 12, 0, 0).unwrap());
         }
 
+        unsafe {
+            std::env::set_var("WEZTERM_AGENT_TAB_BADGE_MODE", "turn");
+        }
         assert_eq!(mux.effective_tab_title(tab.tab_id()), "🤖 scrape");
 
         unsafe {
@@ -2815,6 +2937,88 @@ mod test {
         assert_eq!(mux.effective_tab_title(tab.tab_id()), "scrape");
         unsafe {
             std::env::remove_var("WEZTERM_AGENT_TAB_BADGE");
+            std::env::remove_var("WEZTERM_AGENT_TAB_BADGE_MODE");
+        }
+    }
+
+    #[test]
+    fn attention_badge_clears_only_for_view_that_focuses_agent() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        unsafe {
+            std::env::set_var("WEZTERM_AGENT_TAB_BADGE_MODE", "attention");
+        }
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        tab.set_title("scrape");
+        let pane = FakePane::new(44, size, domain.id);
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_agent_metadata(pane_id, sample_agent_metadata("scraper"))
+            .unwrap();
+
+        {
+            let mut runtime_by_pane = mux.agent_runtime_by_pane.write();
+            let runtime = runtime_by_pane.get_mut(&pane_id).unwrap();
+            runtime.turn_state = crate::agent::AgentTurnState::WaitingOnUser;
+            runtime.last_turn_completed_at =
+                Some(Utc.with_ymd_and_hms(2026, 3, 18, 12, 30, 0).unwrap());
+        }
+
+        let client_a = Arc::new(ClientId::new());
+        let view_a = Arc::new(ClientViewId("view-a".to_string()));
+        mux.register_client(client_a.clone(), view_a.clone());
+        mux.set_active_tab_for_client_view(view_a.as_ref(), window_id, tab.tab_id())
+            .unwrap();
+        mux.set_active_pane_for_client_view(view_a.as_ref(), window_id, tab.tab_id(), pane_id)
+            .unwrap();
+
+        let client_b = Arc::new(ClientId::new());
+        let view_b = Arc::new(ClientViewId("view-b".to_string()));
+        mux.register_client(client_b.clone(), view_b.clone());
+        mux.set_active_tab_for_client_view(view_b.as_ref(), window_id, tab.tab_id())
+            .unwrap();
+        mux.set_active_pane_for_client_view(view_b.as_ref(), window_id, tab.tab_id(), pane_id)
+            .unwrap();
+
+        assert_eq!(
+            mux.effective_tab_title_for_view(view_a.as_ref(), tab.tab_id()),
+            "🤖 scrape"
+        );
+        assert_eq!(
+            mux.effective_tab_title_for_view(view_b.as_ref(), tab.tab_id()),
+            "🤖 scrape"
+        );
+
+        mux.record_focus_for_client(client_a.as_ref(), pane_id);
+
+        assert_eq!(
+            mux.effective_tab_title_for_view(view_a.as_ref(), tab.tab_id()),
+            "scrape"
+        );
+        assert_eq!(
+            mux.effective_tab_title_for_view(view_b.as_ref(), tab.tab_id()),
+            "🤖 scrape"
+        );
+
+        unsafe {
+            std::env::remove_var("WEZTERM_AGENT_TAB_BADGE_MODE");
         }
     }
 

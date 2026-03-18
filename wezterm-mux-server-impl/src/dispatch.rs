@@ -4,8 +4,8 @@ use async_ossl::AsyncSslStream;
 use codec::{DecodedPdu, Pdu};
 use futures::FutureExt;
 use mux::{Mux, MuxNotification};
-use smol::prelude::*;
 use smol::Async;
+use smol::prelude::*;
 use wezterm_uds::UnixStream;
 
 #[cfg(unix)]
@@ -185,7 +185,7 @@ where
                 }
             }
             Ok(Item::Notif(MuxNotification::TabTitleChanged { tab_id, title: _ })) => {
-                let title = Mux::get().effective_tab_title(tab_id);
+                let title = handler.tab_title_for_client(tab_id);
                 Pdu::TabTitleChanged(codec::TabTitleChanged { tab_id, title })
                     .encode_async(&mut stream, 0)
                     .await?;
