@@ -96,9 +96,9 @@ struct PaneContext {
 
 #[derive(Debug, Parser, Clone)]
 pub struct SpawnAgentCommand {
-    /// Stable human-readable name for this agent
+    /// Stable human-readable name for this agent. Defaults to codex/claude with a numeric suffix.
     #[arg(long)]
-    name: String,
+    name: Option<String>,
 
     /// Spawn into a split instead of creating a new tab
     #[arg(long, conflicts_with_all = &["new_window", "workspace"])]
@@ -179,7 +179,9 @@ impl SpawnAgentCommand {
                 |request| client.set_tab_title(request),
                 |request| client.set_agent_metadata(request),
                 |request| client.kill_pane(request),
-                |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+                |cmd, agent_name, agents, current_cwd| {
+                    cmd.prepare_launch(agent_name, agents, current_cwd)
+                },
             )
             .await?;
         write_json(&snapshot)
@@ -240,6 +242,7 @@ impl SpawnAgentCommand {
         KillPaneFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
         PrepareLaunchFn: FnOnce(
             &SpawnAgentCommand,
+            &str,
             &[AgentSnapshot],
             Option<String>,
         ) -> anyhow::Result<PreparedAgentLaunch>,
@@ -262,10 +265,11 @@ impl SpawnAgentCommand {
         });
 
         let agents = list_agents().await?.agents;
-        ensure_agent_name_available(&agents, &self.name)?;
+        let agent_name = resolve_spawn_agent_name(&self.cmd, self.name.as_deref(), &agents)?;
 
         let prepared = prepare_launch(
             self,
+            &agent_name,
             &agents,
             pane_context
                 .as_ref()
@@ -338,7 +342,7 @@ impl SpawnAgentCommand {
         if !self.split {
             if let Err(err) = set_tab_title(TabTitleChanged {
                 tab_id: spawned.tab_id,
-                title: self.name.clone(),
+                title: agent_name.clone(),
             })
             .await
             {
@@ -352,7 +356,7 @@ impl SpawnAgentCommand {
 
         let metadata = AgentMetadata {
             agent_id: Uuid::new_v4().to_string(),
-            name: self.name.clone(),
+            name: agent_name,
             launch_cmd: prepared.launch_cmd,
             declared_cwd: prepared.command_dir,
             created_at: Utc::now(),
@@ -408,6 +412,7 @@ impl SpawnAgentCommand {
 
     fn prepare_launch(
         &self,
+        agent_name: &str,
         _agents: &[AgentSnapshot],
         current_cwd: Option<String>,
     ) -> anyhow::Result<PreparedAgentLaunch> {
@@ -428,7 +433,7 @@ impl SpawnAgentCommand {
                 let repo_root = repo_root
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("--worktree auto requires --repo"))?;
-                Some(auto_worktree_path(repo_root, &self.name))
+                Some(auto_worktree_path(repo_root, agent_name))
             }
             WorktreeMode::Path(path) => Some(normalize_path(path)?),
         };
@@ -494,6 +499,50 @@ fn ensure_agent_name_available(
         );
     }
     Ok(())
+}
+
+fn next_available_agent_name(agents: &[AgentSnapshot], base_name: &str) -> String {
+    if !agents
+        .iter()
+        .any(|agent| agent.metadata.name == base_name)
+    {
+        return base_name.to_string();
+    }
+
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base_name}{suffix}");
+        if !agents
+            .iter()
+            .any(|agent| agent.metadata.name == candidate)
+        {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn resolve_spawn_agent_name(
+    cmd: &str,
+    requested_name: Option<&str>,
+    agents: &[AgentSnapshot],
+) -> anyhow::Result<String> {
+    if let Some(name) = requested_name {
+        ensure_agent_name_available(agents, name)?;
+        return Ok(name.to_string());
+    }
+
+    let base_name = match infer_harness(cmd, None) {
+        AgentHarness::Codex => "codex",
+        AgentHarness::Claude => "claude",
+        AgentHarness::Unknown => {
+            bail!(
+                "agent spawn requires a recognized harness command (currently: codex, claude); use agent adopt for generic panes"
+            )
+        }
+    };
+
+    Ok(next_available_agent_name(agents, base_name))
 }
 
 fn find_pane_context(panes: &ListPanesResponse, pane_id: PaneId) -> Option<PaneContext> {
@@ -1877,7 +1926,7 @@ mod test {
         let split_calls = Rc::new(RefCell::new(vec![]));
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
-            name: "reviewer".to_string(),
+            name: Some("reviewer".to_string()),
             split: true,
             pane_id: Some(30),
             new_window: false,
@@ -1936,7 +1985,9 @@ mod test {
                 }
             },
             |_| async move { panic!("kill_pane should not be called on success") },
-            |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+            |cmd, agent_name, agents, current_cwd| {
+                cmd.prepare_launch(agent_name, agents, current_cwd)
+            },
         ))
         .unwrap();
 
@@ -1969,7 +2020,7 @@ mod test {
         let title_calls = Rc::new(RefCell::new(vec![]));
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
-            name: "reviewer".to_string(),
+            name: Some("reviewer".to_string()),
             split: false,
             pane_id: Some(30),
             new_window: false,
@@ -2022,7 +2073,9 @@ mod test {
                 }
             },
             |_| async { panic!("kill_pane should not be called on success") },
-            |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+            |cmd, agent_name, agents, current_cwd| {
+                cmd.prepare_launch(agent_name, agents, current_cwd)
+            },
         ))
         .unwrap();
 
@@ -2049,7 +2102,7 @@ mod test {
     fn spawn_cleans_up_spawned_pane_when_metadata_attachment_fails() {
         let kill_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
-            name: "reviewer".to_string(),
+            name: Some("reviewer".to_string()),
             split: false,
             pane_id: None,
             new_window: true,
@@ -2085,7 +2138,9 @@ mod test {
                     async { Ok(UnitResponse {}) }
                 }
             },
-            |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+            |cmd, agent_name, agents, current_cwd| {
+                cmd.prepare_launch(agent_name, agents, current_cwd)
+            },
         ))
         .unwrap_err();
 
@@ -2101,7 +2156,7 @@ mod test {
     fn spawn_cleans_up_spawned_pane_when_initial_tab_title_fails() {
         let kill_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
-            name: "reviewer".to_string(),
+            name: Some("reviewer".to_string()),
             split: false,
             pane_id: None,
             new_window: true,
@@ -2137,7 +2192,9 @@ mod test {
                     async { Ok(UnitResponse {}) }
                 }
             },
-            |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+            |cmd, agent_name, agents, current_cwd| {
+                cmd.prepare_launch(agent_name, agents, current_cwd)
+            },
         ))
         .unwrap_err();
 
@@ -2156,7 +2213,7 @@ mod test {
         let title_calls = Rc::new(RefCell::new(vec![]));
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
-            name: "scrape-api".to_string(),
+            name: Some("scrape-api".to_string()),
             split: false,
             pane_id: None,
             new_window: true,
@@ -2209,7 +2266,9 @@ mod test {
                 }
             },
             |_| async { panic!("kill_pane should not be called") },
-            |cmd, agents, current_cwd| cmd.prepare_launch(agents, current_cwd),
+            |cmd, agent_name, agents, current_cwd| {
+                cmd.prepare_launch(agent_name, agents, current_cwd)
+            },
         ))
         .unwrap();
 
@@ -2254,7 +2313,7 @@ mod test {
         let (_temp, repo_root) = init_git_repo();
         let requested_worktree = auto_worktree_path(&repo_root, "alpha");
         let command = SpawnAgentCommand {
-            name: "beta".to_string(),
+            name: Some("beta".to_string()),
             split: false,
             pane_id: None,
             new_window: true,
@@ -2275,7 +2334,7 @@ mod test {
         let mut owner = sample_agent(40, "alpha");
         owner.metadata.worktree = Some(requested_worktree.to_string_lossy().to_string());
 
-        let prepared = command.prepare_launch(&[owner], None).unwrap();
+        let prepared = command.prepare_launch("beta", &[owner], None).unwrap();
         assert_eq!(
             prepared.worktree.as_deref(),
             Some(requested_worktree.to_string_lossy().as_ref())
@@ -2285,7 +2344,7 @@ mod test {
     #[test]
     fn spawn_rejects_unrecognized_harness_commands() {
         let command = SpawnAgentCommand {
-            name: "shell".to_string(),
+            name: Some("shell".to_string()),
             split: false,
             pane_id: None,
             new_window: true,
@@ -2304,9 +2363,97 @@ mod test {
             cmd: "zsh".to_string(),
         };
 
-        let err = command.prepare_launch(&[], None).unwrap_err();
+        let err = command.prepare_launch("shell", &[], None).unwrap_err();
         assert!(err
             .to_string()
             .contains("agent spawn requires a recognized harness command"));
+    }
+
+    #[test]
+    fn spawn_without_name_uses_harness_base_name() {
+        let spawn_calls = Rc::new(RefCell::new(vec![]));
+        let title_calls = Rc::new(RefCell::new(vec![]));
+        let set_calls = Rc::new(RefCell::new(vec![]));
+        let command = SpawnAgentCommand {
+            name: None,
+            split: false,
+            pane_id: None,
+            new_window: true,
+            workspace: Some("agents".to_string()),
+            horizontal: false,
+            left: false,
+            right: false,
+            top: false,
+            bottom: false,
+            cells: None,
+            percent: None,
+            repo: None,
+            worktree: WorktreeMode::None,
+            branch: None,
+            cwd: None,
+            cmd: "codex".to_string(),
+        };
+
+        let agent = promise::spawn::block_on(command.run_with(
+            &ConfigHandle::default_config(),
+            || async { Ok(ListAgentsResponse { agents: vec![] }) },
+            || async { panic!("list_panes should not be used for new-window agent spawn") },
+            || async {
+                Ok(ListAgentsResponse {
+                    agents: vec![sample_agent(88, "codex")],
+                })
+            },
+            |_| async { panic!("resolve_pane_id should not be called") },
+            {
+                let spawn_calls = Rc::clone(&spawn_calls);
+                move |request| {
+                    spawn_calls.borrow_mut().push(request);
+                    async { Ok(sample_spawn_response(88, 30)) }
+                }
+            },
+            |_| async { panic!("split_pane should not be used") },
+            {
+                let title_calls = Rc::clone(&title_calls);
+                move |request| {
+                    title_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            {
+                let set_calls = Rc::clone(&set_calls);
+                move |request| {
+                    set_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            |_| async { panic!("kill_pane should not be called") },
+            |cmd, agent_name, agents, current_cwd| {
+                cmd.prepare_launch(agent_name, agents, current_cwd)
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(agent.metadata.name, "codex");
+        let title_calls = title_calls.borrow();
+        assert_eq!(title_calls.len(), 1);
+        assert_eq!(title_calls[0].title, "codex");
+        let set_calls = set_calls.borrow();
+        assert_eq!(set_calls.len(), 1);
+        assert_eq!(set_calls[0].metadata.name, "codex");
+        let spawn_calls = spawn_calls.borrow();
+        assert_eq!(spawn_calls.len(), 1);
+    }
+
+    #[test]
+    fn spawn_without_name_uses_next_numeric_suffix() {
+        let agents = vec![sample_agent(41, "codex"), sample_agent(42, "codex2")];
+        assert_eq!(
+            resolve_spawn_agent_name("codex", None, &agents).unwrap(),
+            "codex3"
+        );
+        assert_eq!(
+            resolve_spawn_agent_name("claude", None, &agents).unwrap(),
+            "claude"
+        );
     }
 }
