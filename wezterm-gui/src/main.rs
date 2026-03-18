@@ -614,7 +614,7 @@ impl Publish {
                             .spawn_v2(codec::SpawnV2 {
                                 domain,
                                 window_id,
-                                current_pane_id: None,
+                                current_pane_id: pane_id,
                                 command,
                                 command_dir: None,
                                 size,

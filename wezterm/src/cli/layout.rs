@@ -287,6 +287,7 @@ async fn restore_window(client: &Client, window: SavedWindow) -> anyhow::Result<
         );
     }
 
+    let mut source_pane_id = None;
     for (tab_idx, tab) in window.tabs.iter().enumerate() {
         let command_dir = saved_command_dir(tab.root.first_leaf_cwd());
 
@@ -294,7 +295,7 @@ async fn restore_window(client: &Client, window: SavedWindow) -> anyhow::Result<
             .spawn_v2(SpawnV2 {
                 domain: SpawnTabDomain::DefaultDomain,
                 window_id,
-                current_pane_id: None,
+                current_pane_id: source_pane_id,
                 command: None,
                 command_dir,
                 size: tab.size,
@@ -303,6 +304,7 @@ async fn restore_window(client: &Client, window: SavedWindow) -> anyhow::Result<
             .await?;
 
         window_id.get_or_insert(spawned.window_id);
+        source_pane_id = Some(spawned.pane_id);
 
         if !window.title.is_empty() {
             client

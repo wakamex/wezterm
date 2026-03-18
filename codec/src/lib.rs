@@ -780,8 +780,8 @@ pub struct SpawnV2 {
     pub domain: config::keyassignment::SpawnTabDomain,
     /// If None, create a new window for this new tab
     pub window_id: Option<WindowId>,
-    /// Optional explicit source pane for resolving existing-window
-    /// context when the caller does not have per-client view state.
+    /// Explicit source pane for existing-window spawns.
+    /// Required when `window_id` is set.
     pub current_pane_id: Option<PaneId>,
     pub command: Option<CommandBuilder>,
     pub command_dir: Option<String>,

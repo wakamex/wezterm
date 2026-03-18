@@ -908,12 +908,18 @@ impl Domain for ClientDomain {
             .ok_or_else(|| anyhow!("domain is not attached"))?;
 
         let workspace = Mux::get().active_workspace();
+        let local_pane = Mux::get()
+            .get_active_pane_for_window_for_current_identity(window)
+            .ok_or_else(|| anyhow!("window {} has no active pane for this client", window))?;
+        let pane = local_pane
+            .downcast_ref::<ClientPane>()
+            .ok_or_else(|| anyhow!("active pane for window {} is not a ClientPane", window))?;
         let result = inner
             .client
             .spawn_v2(SpawnV2 {
                 domain: SpawnTabDomain::DefaultDomain,
                 window_id: inner.local_to_remote_window(window),
-                current_pane_id: None,
+                current_pane_id: Some(pane.remote_pane_id),
                 size,
                 command,
                 command_dir,

@@ -2106,7 +2106,15 @@ impl Mux {
         let trace_enabled = size_trace_enabled();
         if trace_enabled {
             let existing = if let Some(id) = window_id {
-                self.get_active_tab_for_window_for_current_identity(id)
+                current_pane_id
+                    .and_then(|pane_id| {
+                        let (_, pane_window_id, tab_id) = self.resolve_pane_id(pane_id)?;
+                        if pane_window_id != id {
+                            return None;
+                        }
+                        Some(tab_id)
+                    })
+                    .and_then(|tab_id| self.get_tab(tab_id))
                     .map(|tab| tab.debug_size_snapshot())
                     .unwrap_or_else(|| "none".to_string())
             } else {
@@ -2134,23 +2142,25 @@ impl Mux {
             let _window = self
                 .get_window(window_id)
                 .ok_or_else(|| anyhow!("window_id {} not found on this server", window_id))?;
-            let explicit_context = current_pane_id
-                .and_then(|pane_id| {
-                    let (_, pane_window_id, tab_id) = self.resolve_pane_id(pane_id)?;
-                    if pane_window_id != window_id {
-                        return None;
-                    }
-                    Some((tab_id, pane_id))
-                })
-                .and_then(|(tab_id, pane_id)| Some((self.get_tab(tab_id)?, self.get_pane(pane_id)?)));
-            let (tab, pane) = explicit_context
-                .or_else(|| {
-                    Some((
-                        self.get_active_tab_for_window_for_current_identity(window_id)?,
-                        self.get_active_pane_for_window_for_current_identity(window_id)?,
-                    ))
-                })
-                .ok_or_else(|| anyhow!("window {} has no active tab for this client", window_id))?;
+            let pane_id = current_pane_id.ok_or_else(|| {
+                anyhow!("existing-window spawn for window {} requires current_pane_id", window_id)
+            })?;
+            let (_, pane_window_id, tab_id) = self
+                .resolve_pane_id(pane_id)
+                .ok_or_else(|| anyhow!("current_pane_id {} is invalid", pane_id))?;
+            anyhow::ensure!(
+                pane_window_id == window_id,
+                "current_pane_id {} is in window {}, not requested window {}",
+                pane_id,
+                pane_window_id,
+                window_id
+            );
+            let tab = self
+                .get_tab(tab_id)
+                .ok_or_else(|| anyhow!("tab {} not found for pane {}", tab_id, pane_id))?;
+            let pane = self
+                .get_pane(pane_id)
+                .ok_or_else(|| anyhow!("pane {} not found", pane_id))?;
             term_config = pane.get_config();
 
             // Trust the caller's size for existing-window spawns so the new
@@ -2923,7 +2933,7 @@ mod test {
                     None,
                     None,
                     desired,
-                    None,
+                    Some(1),
                     DEFAULT_WORKSPACE.to_string(),
                     None,
                 )
@@ -2989,6 +2999,55 @@ mod test {
             assert_eq!(*domain.last_spawn_size.lock(), Some(desired));
             assert_eq!(stale_tab.get_size(), desired);
             assert_eq!(spawned_tab.get_size(), desired);
+        });
+    }
+
+    #[test]
+    fn spawn_tab_in_existing_window_requires_explicit_current_pane() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        smol::block_on(async move {
+            let window_builder = mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+            let window_id = *window_builder;
+
+            let stale = TerminalSize {
+                rows: 1,
+                cols: 1,
+                pixel_width: 8,
+                pixel_height: 16,
+                dpi: 96,
+            };
+            let stale_tab = Arc::new(Tab::new(&stale));
+            stale_tab.assign_pane(&FakePane::new(1, stale, domain.id));
+            mux.add_tab_and_active_pane(&stale_tab).unwrap();
+            mux.add_tab_to_window(&stale_tab, window_id).unwrap();
+
+            let err = match mux
+                .spawn_tab_or_window(
+                    Some(window_id),
+                    config::keyassignment::SpawnTabDomain::DefaultDomain,
+                    None,
+                    None,
+                    stale,
+                    None,
+                    DEFAULT_WORKSPACE.to_string(),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => panic!("spawn_tab_or_window should require current_pane_id"),
+                Err(err) => err,
+            };
+
+            assert!(
+                err.to_string()
+                    .contains("requires current_pane_id")
+            );
         });
     }
 
