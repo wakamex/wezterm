@@ -438,6 +438,7 @@ impl SessionHandler {
                             let view_state = mux.client_window_view_state_for_current_identity();
                             let mut tabs = vec![];
                             let mut tab_titles = vec![];
+                            let mut display_tab_titles = vec![];
                             let mut window_titles = HashMap::new();
                             for window_id in mux.iter_windows().into_iter() {
                                 let window = mux.get_window(window_id).unwrap();
@@ -455,13 +456,15 @@ impl SessionHandler {
                                         tab.codec_pane_tree_with_active_pane_id(active_pane_id);
                                     mux.annotate_pane_tree_with_agent_metadata(&mut tree);
                                     tabs.push(tree);
-                                    tab_titles.push(mux.effective_tab_title(tab.tab_id()));
+                                    tab_titles.push(mux.raw_tab_title(tab.tab_id()));
+                                    display_tab_titles.push(mux.effective_tab_title(tab.tab_id()));
                                 }
                             }
-                            log::trace!("ListPanes {tabs:#?} {tab_titles:?}");
+                            log::trace!("ListPanes {tabs:#?} {display_tab_titles:?}");
                             Ok(Pdu::ListPanesResponse(ListPanesResponse {
                                 tabs,
                                 tab_titles,
+                                display_tab_titles,
                                 window_titles,
                                 client_window_view_state: view_state,
                             }))
@@ -1881,7 +1884,13 @@ mod test {
             std::env::remove_var("WEZTERM_AGENT_CLAUDE_DIR");
         }
 
-        assert!(response.tab_titles.iter().any(|title| title == "🤖 scrape"));
+        assert!(response.tab_titles.iter().any(|title| title == "scrape"));
+        assert!(
+            response
+                .display_tab_titles
+                .iter()
+                .any(|title| title == "🤖 scrape")
+        );
     }
 
     #[test]

@@ -581,7 +581,11 @@ impl ClientDomain {
 
         let client_window_view_state = panes.client_window_view_state.clone();
 
-        for (tabroot, tab_title) in panes.tabs.into_iter().zip(panes.tab_titles.iter()) {
+        for (tabroot, tab_title) in panes
+            .tabs
+            .into_iter()
+            .zip(panes.display_tab_titles.iter())
+        {
             let root_size = match tabroot.root_size() {
                 Some(size) => size,
                 None => continue,
@@ -1182,6 +1186,13 @@ mod test {
     ) -> ListPanesResponse {
         ListPanesResponse {
             tab_titles: tabs
+                .iter()
+                .map(|node| match node {
+                    PaneNode::Leaf(entry) => format!("tab-{}", entry.tab_id),
+                    _ => "tab".to_string(),
+                })
+                .collect(),
+            display_tab_titles: tabs
                 .iter()
                 .map(|node| match node {
                     PaneNode::Leaf(entry) => format!("tab-{}", entry.tab_id),

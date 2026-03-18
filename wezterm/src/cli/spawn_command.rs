@@ -214,6 +214,7 @@ mod test {
         ListPanesResponse {
             tabs,
             tab_titles: vec![],
+            display_tab_titles: vec![],
             window_titles: HashMap::new(),
             client_window_view_state: HashMap::new(),
         }

@@ -1492,6 +1492,7 @@ mod test {
         ListPanesResponse {
             tabs: panes,
             tab_titles: vec!["tab".to_string()],
+            display_tab_titles: vec!["tab".to_string()],
             window_titles: HashMap::new(),
             client_window_view_state: HashMap::<mux::window::WindowId, ClientWindowViewState>::new(
             ),

@@ -276,6 +276,7 @@ mod test {
                     Ok(ListPanesResponse {
                         tabs: vec![leaf(3, 7, 21, size(120, 40), true), leaf(3, 9, 42, size(120, 40), true)],
                         tab_titles: vec!["one".into(), "two".into()],
+                        display_tab_titles: vec!["one".into(), "two".into()],
                         window_titles: HashMap::from([(3, "win".into())]),
                         client_window_view_state: HashMap::from([(
                             3,
@@ -355,6 +356,7 @@ mod test {
                             },
                         )],
                         tab_titles: vec!["target".into()],
+                        display_tab_titles: vec!["target".into()],
                         window_titles: HashMap::from([(5, "win".into())]),
                         client_window_view_state: HashMap::from([(
                             5,

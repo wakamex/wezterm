@@ -731,6 +731,36 @@ impl Mux {
         }
     }
 
+    pub fn sanitize_tab_title_text(title: &str) -> String {
+        let mut stripped = title;
+        loop {
+            let mut changed = false;
+            for badge in IntoIterator::into_iter([
+                std::env::var("WEZTERM_AGENT_TAB_BADGE").ok(),
+                Some("🤖 ".to_string()),
+            ])
+            .flatten()
+            .filter(|badge| !badge.is_empty())
+            {
+                if let Some(rest) = stripped.strip_prefix(badge.as_str()) {
+                    stripped = rest;
+                    changed = true;
+                    break;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        stripped.to_string()
+    }
+
+    pub fn raw_tab_title(&self, tab_id: TabId) -> String {
+        self.get_tab(tab_id)
+            .map(|tab| Self::sanitize_tab_title_text(&tab.get_title()))
+            .unwrap_or_default()
+    }
+
     fn should_badge_tab_for_agents(&self, tab_id: TabId) -> bool {
         let Some(tab) = self.get_tab(tab_id) else {
             return false;
@@ -758,10 +788,7 @@ impl Mux {
     }
 
     pub fn effective_tab_title(&self, tab_id: TabId) -> String {
-        let base_title = self
-            .get_tab(tab_id)
-            .map(|tab| tab.get_title())
-            .unwrap_or_default();
+        let base_title = self.raw_tab_title(tab_id);
         if self.should_badge_tab_for_agents(tab_id) {
             if let Some(badge) = Self::agent_tab_badge_text() {
                 return format!("{badge}{base_title}");
@@ -2818,7 +2845,7 @@ mod test {
 
         let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
         let tab = Arc::new(Tab::new(&size));
-        tab.set_title("scrape");
+        tab.set_title("🤖 🤖 scrape");
         let pane = FakePane::new(43, size, domain.id);
         let pane_id = pane.pane_id();
         tab.assign_pane(&pane);
