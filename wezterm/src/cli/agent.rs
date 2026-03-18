@@ -6,7 +6,8 @@ use codec::{InputSerial, ListPanesResponse, SendKeyDown, SpawnV2};
 use config::keyassignment::SpawnTabDomain;
 use config::ConfigHandle;
 use mux::agent::{
-    AgentHarness, AgentMetadata, AgentSnapshot, AgentStatus, AgentTransport, AgentTurnState,
+    infer_harness, AgentHarness, AgentMetadata, AgentSnapshot, AgentStatus, AgentTransport,
+    AgentTurnState,
 };
 use mux::pane::PaneId;
 use mux::tab::{size_trace_enabled, SplitDirection, SplitRequest, SplitSize};
@@ -389,6 +390,12 @@ impl SpawnAgentCommand {
         _agents: &[AgentSnapshot],
         current_cwd: Option<String>,
     ) -> anyhow::Result<PreparedAgentLaunch> {
+        let harness = infer_harness(&self.cmd, None);
+        anyhow::ensure!(
+            !matches!(harness, AgentHarness::Unknown),
+            "agent spawn requires a recognized harness command (currently: codex, claude); use agent adopt for generic panes"
+        );
+
         let repo_root = self
             .repo
             .as_ref()
@@ -2171,5 +2178,33 @@ mod test {
             prepared.worktree.as_deref(),
             Some(requested_worktree.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn spawn_rejects_unrecognized_harness_commands() {
+        let command = SpawnAgentCommand {
+            name: "shell".to_string(),
+            split: false,
+            pane_id: None,
+            new_window: true,
+            workspace: Some("agents".to_string()),
+            horizontal: false,
+            left: false,
+            right: false,
+            top: false,
+            bottom: false,
+            cells: None,
+            percent: None,
+            repo: None,
+            worktree: WorktreeMode::None,
+            branch: None,
+            cwd: None,
+            cmd: "zsh".to_string(),
+        };
+
+        let err = command.prepare_launch(&[], None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("agent spawn requires a recognized harness command"));
     }
 }
