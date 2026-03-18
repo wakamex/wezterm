@@ -33,8 +33,8 @@ pub struct AgentCommand {
 
 #[derive(Debug, Subcommand, Clone)]
 enum AgentSubCommand {
-    #[command(name = "spawn", about = "spawn a new agent pane or tab")]
-    Spawn(SpawnAgentCommand),
+    #[command(name = "start", about = "start a managed agent in the current pane, a split, a new tab, or a new window")]
+    Start(SpawnAgentCommand),
 
     #[command(name = "adopt", about = "adopt an existing pane as a managed agent")]
     Adopt(AdoptAgentCommand),
@@ -58,7 +58,7 @@ enum AgentSubCommand {
 impl AgentCommand {
     pub async fn run(&self, client: Client, config: &ConfigHandle) -> anyhow::Result<()> {
         match &self.sub {
-            AgentSubCommand::Spawn(cmd) => cmd.run(client, config).await,
+            AgentSubCommand::Start(cmd) => cmd.run(client, config).await,
             AgentSubCommand::Adopt(cmd) => cmd.run(client).await,
             AgentSubCommand::List(cmd) => cmd.run(client).await,
             AgentSubCommand::Inspect(cmd) => cmd.run(client).await,
@@ -90,12 +90,18 @@ struct PreparedAgentLaunch {
 #[derive(Debug, Clone)]
 struct PaneContext {
     window_id: WindowId,
+    tab_id: mux::tab::TabId,
+    tab_title: String,
     tab_size: wezterm_term::TerminalSize,
     cwd: Option<String>,
 }
 
 #[derive(Debug, Parser, Clone)]
 pub struct SpawnAgentCommand {
+    /// Start the harness in the current pane instead of creating a new pane/tab/window.
+    #[arg(long, conflicts_with_all = &["split", "new_window", "workspace", "horizontal", "left", "right", "top", "bottom", "cells", "percent"])]
+    here: bool,
+
     /// Stable human-readable name for this agent. Defaults to codex/claude with a numeric suffix.
     #[arg(long)]
     name: Option<String>,
@@ -176,8 +182,11 @@ impl SpawnAgentCommand {
                 |pane_id| client.resolve_pane_id(pane_id),
                 |request| client.spawn_v2(request),
                 |request| client.split_pane(request),
+                |request| client.send_paste(request),
+                |request| client.key_down(request),
                 |request| client.set_tab_title(request),
                 |request| client.set_agent_metadata(request),
+                |request| client.clear_agent_metadata(request),
                 |request| client.kill_pane(request),
                 |cmd, agent_name, agents, current_cwd| {
                     cmd.prepare_launch(agent_name, agents, current_cwd)
@@ -200,10 +209,16 @@ impl SpawnAgentCommand {
         SpawnV2Fut,
         SplitPaneFn,
         SplitPaneFut,
+        SendPasteFn,
+        SendPasteFut,
+        KeyDownFn,
+        KeyDownFut,
         SetTabTitleFn,
         SetTabTitleFut,
         SetAgentMetadataFn,
         SetAgentMetadataFut,
+        ClearAgentMetadataFn,
+        ClearAgentMetadataFut,
         KillPaneFn,
         KillPaneFut,
         PrepareLaunchFn,
@@ -216,9 +231,12 @@ impl SpawnAgentCommand {
         resolve_pane_id: ResolvePaneId,
         spawn_v2: SpawnV2Fn,
         split_pane: SplitPaneFn,
-        set_tab_title: SetTabTitleFn,
-        set_agent_metadata: SetAgentMetadataFn,
-        kill_pane: KillPaneFn,
+        mut send_paste: SendPasteFn,
+        mut key_down: KeyDownFn,
+        mut set_tab_title: SetTabTitleFn,
+        mut set_agent_metadata: SetAgentMetadataFn,
+        mut clear_agent_metadata: ClearAgentMetadataFn,
+        mut kill_pane: KillPaneFn,
         prepare_launch: PrepareLaunchFn,
     ) -> anyhow::Result<AgentSnapshot>
     where
@@ -234,11 +252,17 @@ impl SpawnAgentCommand {
         SpawnV2Fut: Future<Output = anyhow::Result<codec::SpawnResponse>>,
         SplitPaneFn: FnOnce(codec::SplitPane) -> SplitPaneFut,
         SplitPaneFut: Future<Output = anyhow::Result<codec::SpawnResponse>>,
-        SetTabTitleFn: FnOnce(codec::TabTitleChanged) -> SetTabTitleFut,
+        SendPasteFn: FnMut(codec::SendPaste) -> SendPasteFut,
+        SendPasteFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
+        KeyDownFn: FnMut(SendKeyDown) -> KeyDownFut,
+        KeyDownFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
+        SetTabTitleFn: FnMut(codec::TabTitleChanged) -> SetTabTitleFut,
         SetTabTitleFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
-        SetAgentMetadataFn: FnOnce(codec::SetAgentMetadata) -> SetAgentMetadataFut,
+        SetAgentMetadataFn: FnMut(codec::SetAgentMetadata) -> SetAgentMetadataFut,
         SetAgentMetadataFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
-        KillPaneFn: FnOnce(codec::KillPane) -> KillPaneFut,
+        ClearAgentMetadataFn: FnMut(codec::ClearAgentMetadata) -> ClearAgentMetadataFut,
+        ClearAgentMetadataFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
+        KillPaneFn: FnMut(codec::KillPane) -> KillPaneFut,
         KillPaneFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
         PrepareLaunchFn: FnOnce(
             &SpawnAgentCommand,
@@ -247,7 +271,7 @@ impl SpawnAgentCommand {
             Option<String>,
         ) -> anyhow::Result<PreparedAgentLaunch>,
     {
-        let context_pane_id = if self.split || self.pane_id.is_some() || !self.new_window {
+        let context_pane_id = if self.here || self.split || self.pane_id.is_some() || !self.new_window {
             Some(resolve_pane_id(self.pane_id).await?)
         } else {
             None
@@ -276,7 +300,76 @@ impl SpawnAgentCommand {
                 .and_then(|context| context.cwd.clone()),
         )?;
 
-        let spawned = if self.split {
+        let metadata = AgentMetadata {
+            agent_id: Uuid::new_v4().to_string(),
+            name: agent_name.clone(),
+            launch_cmd: prepared.launch_cmd.clone(),
+            declared_cwd: prepared.command_dir.clone(),
+            created_at: Utc::now(),
+            repo_root: prepared.repo_root.clone(),
+            worktree: prepared.worktree.clone(),
+            branch: prepared.branch.clone(),
+            managed_checkout: prepared.managed_checkout,
+        };
+
+        let spawned = if self.here {
+            let pane_id =
+                context_pane_id.ok_or_else(|| anyhow::anyhow!("--here requires a pane"))?;
+            let pane_context = pane_context
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("unable to resolve current pane context"))?;
+
+            set_agent_metadata(codec::SetAgentMetadata {
+                pane_id,
+                metadata: metadata.clone(),
+            })
+            .await?;
+
+            let launch_text = build_in_place_launch_command(
+                pane_context.cwd.as_deref(),
+                &prepared.command_dir,
+                &self.cmd,
+            )?;
+
+            if let Err(err) = send_paste(codec::SendPaste {
+                pane_id,
+                data: launch_text,
+            })
+            .await
+            {
+                let _ = clear_agent_metadata(codec::ClearAgentMetadata { pane_id }).await;
+                return Err(err.context("set agent metadata but failed to send launch command"));
+            }
+
+            if let Err(err) = key_down(SendKeyDown {
+                pane_id,
+                event: KeyEvent {
+                    key: KeyCode::Enter,
+                    modifiers: Modifiers::NONE,
+                },
+                input_serial: InputSerial::now(),
+            })
+            .await
+            {
+                let _ = clear_agent_metadata(codec::ClearAgentMetadata { pane_id }).await;
+                return Err(err.context("sent launch command but failed to submit it"));
+            }
+
+            if pane_context.tab_title.is_empty() {
+                let _ = set_tab_title(TabTitleChanged {
+                    tab_id: pane_context.tab_id,
+                    title: agent_name.clone(),
+                })
+                .await;
+            }
+
+            codec::SpawnResponse {
+                tab_id: pane_context.tab_id,
+                pane_id,
+                window_id: pane_context.window_id,
+                size: pane_context.tab_size,
+            }
+        } else if self.split {
             let pane_id =
                 context_pane_id.ok_or_else(|| anyhow::anyhow!("split requires a pane"))?;
             let tab_size = pane_context
@@ -339,7 +432,7 @@ impl SpawnAgentCommand {
             .await?
         };
 
-        if !self.split {
+        if !self.split && !self.here {
             if let Err(err) = set_tab_title(TabTitleChanged {
                 tab_id: spawned.tab_id,
                 title: agent_name.clone(),
@@ -354,29 +447,19 @@ impl SpawnAgentCommand {
             }
         }
 
-        let metadata = AgentMetadata {
-            agent_id: Uuid::new_v4().to_string(),
-            name: agent_name,
-            launch_cmd: prepared.launch_cmd,
-            declared_cwd: prepared.command_dir,
-            created_at: Utc::now(),
-            repo_root: prepared.repo_root,
-            worktree: prepared.worktree,
-            branch: prepared.branch,
-            managed_checkout: prepared.managed_checkout,
-        };
-
-        if let Err(err) = set_agent_metadata(codec::SetAgentMetadata {
-            pane_id: spawned.pane_id,
-            metadata,
-        })
-        .await
-        {
-            let _ = kill_pane(codec::KillPane {
+        if !self.here {
+            if let Err(err) = set_agent_metadata(codec::SetAgentMetadata {
                 pane_id: spawned.pane_id,
+                metadata,
             })
-            .await;
-            return Err(err.context("spawned pane but failed to attach agent metadata"));
+            .await
+            {
+                let _ = kill_pane(codec::KillPane {
+                    pane_id: spawned.pane_id,
+                })
+                .await;
+                return Err(err.context("spawned pane but failed to attach agent metadata"));
+            }
         }
 
         list_agents_after_set()
@@ -545,8 +628,22 @@ fn resolve_spawn_agent_name(
     Ok(next_available_agent_name(agents, base_name))
 }
 
+fn build_in_place_launch_command(
+    current_cwd: Option<&str>,
+    target_cwd: &str,
+    cmd: &str,
+) -> anyhow::Result<String> {
+    if current_cwd == Some(target_cwd) {
+        return Ok(format!("exec {cmd}"));
+    }
+
+    let quoted_dir =
+        shlex::try_quote(target_cwd).map_err(|err| anyhow::anyhow!("invalid cwd: {err}"))?;
+    Ok(format!("cd {quoted_dir} && exec {cmd}"))
+}
+
 fn find_pane_context(panes: &ListPanesResponse, pane_id: PaneId) -> Option<PaneContext> {
-    for tabroot in &panes.tabs {
+    for (idx, tabroot) in panes.tabs.iter().enumerate() {
         let Some(root_size) = tabroot.root_size() else {
             continue;
         };
@@ -557,6 +654,8 @@ fn find_pane_context(panes: &ListPanesResponse, pane_id: PaneId) -> Option<PaneC
                 if entry.pane_id == pane_id {
                     return Some(PaneContext {
                         window_id: entry.window_id,
+                        tab_id: entry.tab_id,
+                        tab_title: panes.tab_titles.get(idx).cloned().unwrap_or_default(),
                         tab_size: root_size,
                         cwd: pane_working_dir(entry.working_dir.as_ref()),
                     });
@@ -1927,6 +2026,7 @@ mod test {
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
             name: Some("reviewer".to_string()),
+            here: false,
             split: true,
             pane_id: Some(30),
             new_window: false,
@@ -1976,6 +2076,8 @@ mod test {
                     async { Ok(sample_spawn_response(44, 20)) }
                 }
             },
+            |_| async { panic!("send_paste should not be used for split agent start") },
+            |_| async { panic!("key_down should not be used for split agent start") },
             |_| async { panic!("set_tab_title should not be used for split agent spawn") },
             {
                 let set_calls = Rc::clone(&set_calls);
@@ -1984,6 +2086,7 @@ mod test {
                     async { Ok(UnitResponse {}) }
                 }
             },
+            |_| async { panic!("clear_agent_metadata should not be used on success") },
             |_| async move { panic!("kill_pane should not be called on success") },
             |cmd, agent_name, agents, current_cwd| {
                 cmd.prepare_launch(agent_name, agents, current_cwd)
@@ -2021,6 +2124,7 @@ mod test {
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
             name: Some("reviewer".to_string()),
+            here: false,
             split: false,
             pane_id: Some(30),
             new_window: false,
@@ -2058,6 +2162,8 @@ mod test {
                 }
             },
             |_| async { panic!("split_pane should not be used for new-tab agent spawn") },
+            |_| async { panic!("send_paste should not be used for new-tab agent spawn") },
+            |_| async { panic!("key_down should not be used for new-tab agent spawn") },
             {
                 let title_calls = Rc::clone(&title_calls);
                 move |request| {
@@ -2072,6 +2178,7 @@ mod test {
                     async { Ok(UnitResponse {}) }
                 }
             },
+            |_| async { panic!("clear_agent_metadata should not be used on success") },
             |_| async { panic!("kill_pane should not be called on success") },
             |cmd, agent_name, agents, current_cwd| {
                 cmd.prepare_launch(agent_name, agents, current_cwd)
@@ -2103,6 +2210,7 @@ mod test {
         let kill_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
             name: Some("reviewer".to_string()),
+            here: false,
             split: false,
             pane_id: None,
             new_window: true,
@@ -2129,8 +2237,11 @@ mod test {
             |_| async { panic!("resolve_pane_id should not be called") },
             |_| async { Ok(sample_spawn_response(77, 22)) },
             |_| async { panic!("split_pane should not be used") },
+            |_| async { panic!("send_paste should not be used for new-window agent spawn") },
+            |_| async { panic!("key_down should not be used for new-window agent spawn") },
             |_| async { Ok(UnitResponse {}) },
             |_| async { Err(anyhow::anyhow!("metadata attach failed")) },
+            |_| async { panic!("clear_agent_metadata should not be used on metadata failure") },
             {
                 let kill_calls = Rc::clone(&kill_calls);
                 move |request| {
@@ -2157,6 +2268,7 @@ mod test {
         let kill_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
             name: Some("reviewer".to_string()),
+            here: false,
             split: false,
             pane_id: None,
             new_window: true,
@@ -2183,8 +2295,11 @@ mod test {
             |_| async { panic!("resolve_pane_id should not be called") },
             |_| async { Ok(sample_spawn_response(77, 22)) },
             |_| async { panic!("split_pane should not be used") },
+            |_| async { panic!("send_paste should not be used for new-window agent spawn") },
+            |_| async { panic!("key_down should not be used for new-window agent spawn") },
             |_| async { Err(anyhow::anyhow!("title set failed")) },
             |_| async { panic!("set_agent_metadata should not be used on title failure") },
+            |_| async { panic!("clear_agent_metadata should not be used on title failure") },
             {
                 let kill_calls = Rc::clone(&kill_calls);
                 move |request| {
@@ -2214,6 +2329,7 @@ mod test {
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
             name: Some("scrape-api".to_string()),
+            here: false,
             split: false,
             pane_id: None,
             new_window: true,
@@ -2251,6 +2367,8 @@ mod test {
                 }
             },
             |_| async { panic!("split_pane should not be used") },
+            |_| async { panic!("send_paste should not be used for new-window agent spawn") },
+            |_| async { panic!("key_down should not be used for new-window agent spawn") },
             {
                 let title_calls = Rc::clone(&title_calls);
                 move |request| {
@@ -2265,6 +2383,7 @@ mod test {
                     async { Ok(UnitResponse {}) }
                 }
             },
+            |_| async { panic!("clear_agent_metadata should not be used on success") },
             |_| async { panic!("kill_pane should not be called") },
             |cmd, agent_name, agents, current_cwd| {
                 cmd.prepare_launch(agent_name, agents, current_cwd)
@@ -2314,6 +2433,7 @@ mod test {
         let requested_worktree = auto_worktree_path(&repo_root, "alpha");
         let command = SpawnAgentCommand {
             name: Some("beta".to_string()),
+            here: false,
             split: false,
             pane_id: None,
             new_window: true,
@@ -2345,6 +2465,7 @@ mod test {
     fn spawn_rejects_unrecognized_harness_commands() {
         let command = SpawnAgentCommand {
             name: Some("shell".to_string()),
+            here: false,
             split: false,
             pane_id: None,
             new_window: true,
@@ -2376,6 +2497,7 @@ mod test {
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
             name: None,
+            here: false,
             split: false,
             pane_id: None,
             new_window: true,
@@ -2412,6 +2534,8 @@ mod test {
                 }
             },
             |_| async { panic!("split_pane should not be used") },
+            |_| async { panic!("send_paste should not be used for new-window agent spawn") },
+            |_| async { panic!("key_down should not be used for new-window agent spawn") },
             {
                 let title_calls = Rc::clone(&title_calls);
                 move |request| {
@@ -2426,6 +2550,7 @@ mod test {
                     async { Ok(UnitResponse {}) }
                 }
             },
+            |_| async { panic!("clear_agent_metadata should not be used on success") },
             |_| async { panic!("kill_pane should not be called") },
             |cmd, agent_name, agents, current_cwd| {
                 cmd.prepare_launch(agent_name, agents, current_cwd)
@@ -2455,5 +2580,198 @@ mod test {
             resolve_spawn_agent_name("claude", None, &agents).unwrap(),
             "claude"
         );
+    }
+
+    #[test]
+    fn start_here_injects_exec_into_existing_pane_and_sets_metadata() {
+        let paste_calls = Rc::new(RefCell::new(vec![]));
+        let key_calls = Rc::new(RefCell::new(vec![]));
+        let title_calls = Rc::new(RefCell::new(vec![]));
+        let set_calls = Rc::new(RefCell::new(vec![]));
+        let clear_calls = Rc::new(RefCell::new(vec![]));
+        let command = SpawnAgentCommand {
+            name: None,
+            here: true,
+            split: false,
+            pane_id: Some(30),
+            new_window: false,
+            workspace: None,
+            horizontal: false,
+            left: false,
+            right: false,
+            top: false,
+            bottom: false,
+            cells: None,
+            percent: None,
+            repo: None,
+            worktree: WorktreeMode::None,
+            branch: None,
+            cwd: Some("/tmp/agent-start".into()),
+            cmd: "codex".to_string(),
+        };
+
+        let agent = promise::spawn::block_on(command.run_with(
+            &ConfigHandle::default_config(),
+            || async { Ok(ListAgentsResponse { agents: vec![] }) },
+            || async {
+                Ok(ListPanesResponse {
+                    tabs: vec![leaf(10, 20, 30)],
+                    tab_titles: vec!["".into()],
+                    display_tab_titles: vec!["".into()],
+                    window_titles: HashMap::new(),
+                    client_window_view_state: HashMap::new(),
+                })
+            },
+            || async {
+                Ok(ListAgentsResponse {
+                    agents: vec![sample_agent(30, "codex")],
+                })
+            },
+            |pane_id| async move { Ok(pane_id.expect("pane id")) },
+            |_| async { panic!("spawn_v2 should not be used for --here") },
+            |_| async { panic!("split_pane should not be used for --here") },
+            {
+                let paste_calls = Rc::clone(&paste_calls);
+                move |request| {
+                    paste_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            {
+                let key_calls = Rc::clone(&key_calls);
+                move |request| {
+                    key_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            {
+                let title_calls = Rc::clone(&title_calls);
+                move |request| {
+                    title_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            {
+                let set_calls = Rc::clone(&set_calls);
+                move |request| {
+                    set_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            {
+                let clear_calls = Rc::clone(&clear_calls);
+                move |request| {
+                    clear_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            |_| async { panic!("kill_pane should not be used for --here") },
+            |cmd, agent_name, agents, current_cwd| {
+                cmd.prepare_launch(agent_name, agents, current_cwd)
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(agent.pane_id, 30);
+        assert_eq!(agent.metadata.name, "codex");
+
+        let set_calls = set_calls.borrow();
+        assert_eq!(set_calls.len(), 1);
+        assert_eq!(set_calls[0].pane_id, 30);
+        assert_eq!(set_calls[0].metadata.name, "codex");
+        assert_eq!(set_calls[0].metadata.declared_cwd, "/tmp/agent-start");
+
+        let paste_calls = paste_calls.borrow();
+        assert_eq!(paste_calls.len(), 1);
+        assert_eq!(paste_calls[0].pane_id, 30);
+        assert_eq!(paste_calls[0].data, "cd /tmp/agent-start && exec codex");
+
+        let key_calls = key_calls.borrow();
+        assert_eq!(key_calls.len(), 1);
+        assert_eq!(key_calls[0].pane_id, 30);
+        assert_eq!(key_calls[0].event.key, KeyCode::Enter);
+
+        let title_calls = title_calls.borrow();
+        assert_eq!(title_calls.len(), 1);
+        assert_eq!(title_calls[0].tab_id, 20);
+        assert_eq!(title_calls[0].title, "codex");
+
+        let clear_calls = clear_calls.borrow();
+        assert!(clear_calls.is_empty());
+    }
+
+    #[test]
+    fn start_here_clears_metadata_when_launch_send_fails() {
+        let set_calls = Rc::new(RefCell::new(vec![]));
+        let clear_calls = Rc::new(RefCell::new(vec![]));
+        let command = SpawnAgentCommand {
+            name: Some("codex-here".to_string()),
+            here: true,
+            split: false,
+            pane_id: Some(30),
+            new_window: false,
+            workspace: None,
+            horizontal: false,
+            left: false,
+            right: false,
+            top: false,
+            bottom: false,
+            cells: None,
+            percent: None,
+            repo: None,
+            worktree: WorktreeMode::None,
+            branch: None,
+            cwd: None,
+            cmd: "codex".to_string(),
+        };
+
+        let err = promise::spawn::block_on(command.run_with(
+            &ConfigHandle::default_config(),
+            || async { Ok(ListAgentsResponse { agents: vec![] }) },
+            || async {
+                Ok(ListPanesResponse {
+                    tabs: vec![leaf(10, 20, 30)],
+                    tab_titles: vec!["existing".into()],
+                    display_tab_titles: vec!["existing".into()],
+                    window_titles: HashMap::new(),
+                    client_window_view_state: HashMap::new(),
+                })
+            },
+            || async { panic!("list_agents_after_set should not be used on failure") },
+            |pane_id| async move { Ok(pane_id.expect("pane id")) },
+            |_| async { panic!("spawn_v2 should not be used for --here") },
+            |_| async { panic!("split_pane should not be used for --here") },
+            |_| async { Err(anyhow::anyhow!("paste failed")) },
+            |_| async { panic!("key_down should not be used when send_paste fails") },
+            |_| async { panic!("set_tab_title should not be used when send_paste fails") },
+            {
+                let set_calls = Rc::clone(&set_calls);
+                move |request| {
+                    set_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            {
+                let clear_calls = Rc::clone(&clear_calls);
+                move |request| {
+                    clear_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            |_| async { panic!("kill_pane should not be used for --here") },
+            |cmd, agent_name, agents, current_cwd| {
+                cmd.prepare_launch(agent_name, agents, current_cwd)
+            },
+        ))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("set agent metadata but failed to send launch command"));
+        let set_calls = set_calls.borrow();
+        assert_eq!(set_calls.len(), 1);
+        let clear_calls = clear_calls.borrow();
+        assert_eq!(clear_calls.len(), 1);
+        assert_eq!(clear_calls[0].pane_id, 30);
     }
 }
