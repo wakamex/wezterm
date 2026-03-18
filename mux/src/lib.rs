@@ -1,6 +1,6 @@
 use crate::agent::{
-    AgentMetadata, AgentRuntimeSnapshot, AgentSnapshot, derive_runtime_status, infer_harness,
-    refresh_runtime_from_harness,
+    derive_runtime_status, infer_harness, prime_runtime_for_new_agent,
+    refresh_runtime_from_harness, AgentMetadata, AgentRuntimeSnapshot, AgentSnapshot,
 };
 use crate::client::{ClientId, ClientInfo, ClientViewId, ClientViewState, ClientWindowViewState};
 use crate::pane::{CachePolicy, Pane, PaneId};
@@ -561,11 +561,16 @@ impl Mux {
         pane_id: PaneId,
         metadata: AgentMetadata,
     ) -> anyhow::Result<()> {
-        self.get_pane(pane_id)
+        let pane = self
+            .get_pane(pane_id)
             .ok_or_else(|| anyhow!("pane {} is invalid", pane_id))?;
         let old_tab_title = self
             .resolve_pane_id(pane_id)
             .map(|(_, _, tab_id)| self.effective_tab_title(tab_id));
+        let foreground_process_name = pane.get_foreground_process_name(CachePolicy::AllowStale);
+        let tty_name = pane.tty_name();
+        let terminal_progress = pane.get_progress();
+        let alive = !pane.is_dead();
 
         let mut names = self.agent_panes_by_name.write();
         let mut metadata_by_pane = self.agent_metadata_by_pane.write();
@@ -586,10 +591,17 @@ impl Mux {
         }
 
         names.insert(metadata.name.clone(), pane_id);
-        self.agent_runtime_by_pane
+        let mut runtime = self
+            .agent_runtime_by_pane
             .write()
-            .entry(pane_id)
-            .or_insert_with(|| AgentRuntimeSnapshot::new(&metadata));
+            .remove(&pane_id)
+            .unwrap_or_else(|| AgentRuntimeSnapshot::new(&metadata));
+        runtime.alive = alive;
+        runtime.foreground_process_name = foreground_process_name.clone();
+        runtime.tty_name = tty_name;
+        runtime.terminal_progress = terminal_progress;
+        prime_runtime_for_new_agent(&mut runtime, &metadata, foreground_process_name.as_deref());
+        self.agent_runtime_by_pane.write().insert(pane_id, runtime);
         metadata_by_pane.insert(pane_id, Arc::new(metadata));
         drop(metadata_by_pane);
         drop(names);
@@ -815,8 +827,10 @@ impl Mux {
                     pane.get_foreground_process_name(CachePolicy::AllowStale);
                 runtime.tty_name = pane.tty_name();
                 runtime.terminal_progress = pane.get_progress();
-                runtime.harness =
-                    infer_harness(&metadata.launch_cmd, runtime.foreground_process_name.as_deref());
+                runtime.harness = infer_harness(
+                    &metadata.launch_cmd,
+                    runtime.foreground_process_name.as_deref(),
+                );
                 refresh_runtime_from_harness(&mut runtime, metadata);
                 runtime.status = derive_runtime_status(&runtime);
                 runtime
@@ -2170,7 +2184,10 @@ impl Mux {
                 .get_window(window_id)
                 .ok_or_else(|| anyhow!("window_id {} not found on this server", window_id))?;
             let pane_id = current_pane_id.ok_or_else(|| {
-                anyhow!("existing-window spawn for window {} requires current_pane_id", window_id)
+                anyhow!(
+                    "existing-window spawn for window {} requires current_pane_id",
+                    window_id
+                )
             })?;
             let (_, pane_window_id, tab_id) = self
                 .resolve_pane_id(pane_id)
@@ -3071,10 +3088,7 @@ mod test {
                 Err(err) => err,
             };
 
-            assert!(
-                err.to_string()
-                    .contains("requires current_pane_id")
-            );
+            assert!(err.to_string().contains("requires current_pane_id"));
         });
     }
 

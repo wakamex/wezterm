@@ -71,6 +71,8 @@ pub struct AgentRuntimeSnapshot {
     pub progress_summary: Option<String>,
     pub terminal_progress: Progress,
     pub observer_error: Option<String>,
+    #[serde(skip, default)]
+    pub observer_started_at: Option<DateTime<Utc>>,
 }
 
 impl AgentRuntimeSnapshot {
@@ -94,6 +96,7 @@ impl AgentRuntimeSnapshot {
             progress_summary: None,
             terminal_progress: Progress::None,
             observer_error: None,
+            observer_started_at: None,
         }
     }
 }
@@ -107,6 +110,28 @@ pub struct AgentSnapshot {
     pub window_id: WindowId,
     pub workspace: String,
     pub domain_id: DomainId,
+}
+
+pub fn prime_runtime_for_new_agent(
+    runtime: &mut AgentRuntimeSnapshot,
+    metadata: &AgentMetadata,
+    foreground_process_name: Option<&str>,
+) {
+    let configured_harness = infer_harness(&metadata.launch_cmd, None);
+    let process_harness = infer_harness("", foreground_process_name);
+
+    if matches!(configured_harness, AgentHarness::Unknown) || configured_harness == process_harness
+    {
+        runtime.observer_started_at = None;
+        return;
+    }
+
+    runtime.observer_started_at = Some(Utc::now());
+    runtime.session_path = None;
+    runtime.progress_summary = None;
+    runtime.turn_state = AgentTurnState::Unknown;
+    runtime.last_turn_completed_at = None;
+    runtime.transport = AgentTransport::PlainPty;
 }
 
 pub fn infer_harness(launch_cmd: &str, foreground_process_name: Option<&str>) -> AgentHarness {
@@ -178,10 +203,7 @@ fn derive_effective_turn_state(runtime: &AgentRuntimeSnapshot) -> AgentTurnState
     runtime.turn_state.clone()
 }
 
-pub fn refresh_runtime_from_harness(
-    runtime: &mut AgentRuntimeSnapshot,
-    metadata: &AgentMetadata,
-) {
+pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata: &AgentMetadata) {
     let normalized_cwd = normalize_declared_cwd(&metadata.declared_cwd);
     let cwd = normalized_cwd.trim();
     if cwd.is_empty() {
@@ -194,15 +216,38 @@ pub fn refresh_runtime_from_harness(
 
     runtime.observer_error = None;
     runtime.observed_at = Utc::now();
-    let harness = infer_harness(
-        &metadata.launch_cmd,
-        runtime.foreground_process_name.as_deref(),
-    );
-    runtime.harness = harness.clone();
+    let configured_harness = infer_harness(&metadata.launch_cmd, None);
+    let process_harness = infer_harness("", runtime.foreground_process_name.as_deref());
+    runtime.harness = match configured_harness {
+        AgentHarness::Unknown => process_harness.clone(),
+        _ => configured_harness.clone(),
+    };
 
-    let observed = match harness {
-        AgentHarness::Claude => observe_claude(cwd),
-        AgentHarness::Codex => observe_codex(cwd),
+    let observing_harness = match configured_harness {
+        AgentHarness::Unknown => process_harness.clone(),
+        _ if process_harness == configured_harness => configured_harness.clone(),
+        _ => {
+            runtime.session_path = None;
+            runtime.progress_summary = None;
+            runtime.turn_state = AgentTurnState::Unknown;
+            runtime.last_turn_completed_at = None;
+            runtime.transport = AgentTransport::PlainPty;
+            runtime.status = derive_runtime_status(runtime);
+            return;
+        }
+    };
+
+    let observed = match observing_harness {
+        AgentHarness::Claude => observe_claude(
+            cwd,
+            runtime.session_path.as_deref(),
+            runtime.observer_started_at,
+        ),
+        AgentHarness::Codex => observe_codex(
+            cwd,
+            runtime.session_path.as_deref(),
+            runtime.observer_started_at,
+        ),
         AgentHarness::Unknown => Ok(None),
     };
 
@@ -212,6 +257,7 @@ pub fn refresh_runtime_from_harness(
             runtime.progress_summary = snapshot.progress_summary;
             runtime.turn_state = snapshot.turn_state;
             runtime.last_turn_completed_at = snapshot.last_turn_completed_at;
+            runtime.observer_started_at = None;
             if let Some(ts) = snapshot.updated_at {
                 runtime.last_progress_at = Some(
                     runtime
@@ -257,7 +303,11 @@ struct HarnessObservation {
     last_turn_completed_at: Option<DateTime<Utc>>,
 }
 
-fn observe_claude(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
+fn observe_claude(
+    cwd: &str,
+    preferred_session: Option<&str>,
+    updated_after: Option<DateTime<Utc>>,
+) -> anyhow::Result<Option<HarnessObservation>> {
     let Some(root) = claude_sessions_root() else {
         return Ok(None);
     };
@@ -266,7 +316,29 @@ fn observe_claude(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
         return Ok(None);
     }
 
-    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    if let Some(preferred_session) = preferred_session {
+        let preferred_path = Path::new(preferred_session);
+        if preferred_path.is_file() {
+            let modified_at = DateTime::<Utc>::from(fs::metadata(preferred_path)?.modified()?);
+            if updated_after
+                .map(|cutoff| modified_at >= cutoff)
+                .unwrap_or(true)
+            {
+                let (progress_summary, turn_state, last_turn_completed_at) =
+                    read_last_claude_observation(preferred_path)?;
+                return Ok(Some(HarnessObservation {
+                    session_path: Some(preferred_path.to_string_lossy().to_string()),
+                    progress_summary,
+                    updated_at: Some(modified_at),
+                    turn_state,
+                    last_turn_completed_at,
+                }));
+            }
+        }
+    }
+
+    let prefer_earliest = updated_after.is_some();
+    let mut selected: Option<(PathBuf, DateTime<Utc>)> = None;
     for entry in fs::read_dir(&project_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -276,14 +348,22 @@ fn observe_claude(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
         if !claude_session_is_interactive(&path)? {
             continue;
         }
-        let mtime = entry.metadata()?.modified()?;
-        match &latest {
-            Some((_, existing_mtime)) if *existing_mtime >= mtime => {}
-            _ => latest = Some((path, mtime)),
+        let modified_at = DateTime::<Utc>::from(entry.metadata()?.modified()?);
+        if updated_after
+            .map(|cutoff| modified_at < cutoff)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        match &selected {
+            Some((_, existing_modified))
+                if (prefer_earliest && *existing_modified <= modified_at)
+                    || (!prefer_earliest && *existing_modified >= modified_at) => {}
+            _ => selected = Some((path, modified_at)),
         }
     }
 
-    let Some((session, mtime)) = latest else {
+    let Some((session, modified_at)) = selected else {
         return Ok(None);
     };
     let (progress_summary, turn_state, last_turn_completed_at) =
@@ -291,18 +371,44 @@ fn observe_claude(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
     Ok(Some(HarnessObservation {
         session_path: Some(session.to_string_lossy().to_string()),
         progress_summary,
-        updated_at: Some(DateTime::<Utc>::from(mtime)),
+        updated_at: Some(modified_at),
         turn_state,
         last_turn_completed_at,
     }))
 }
 
-fn observe_codex(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
+fn observe_codex(
+    cwd: &str,
+    preferred_session: Option<&str>,
+    updated_after: Option<DateTime<Utc>>,
+) -> anyhow::Result<Option<HarnessObservation>> {
     let Some(root) = codex_sessions_root() else {
         return Ok(None);
     };
 
-    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    if let Some(preferred_session) = preferred_session {
+        let preferred_path = Path::new(preferred_session);
+        if preferred_path.is_file() {
+            let modified_at = DateTime::<Utc>::from(fs::metadata(preferred_path)?.modified()?);
+            if updated_after
+                .map(|cutoff| modified_at >= cutoff)
+                .unwrap_or(true)
+            {
+                let (progress_summary, turn_state, last_turn_completed_at) =
+                    read_last_codex_observation(preferred_path)?;
+                return Ok(Some(HarnessObservation {
+                    session_path: Some(preferred_path.to_string_lossy().to_string()),
+                    progress_summary,
+                    updated_at: Some(modified_at),
+                    turn_state,
+                    last_turn_completed_at,
+                }));
+            }
+        }
+    }
+
+    let prefer_earliest = updated_after.is_some();
+    let mut selected: Option<(PathBuf, DateTime<Utc>)> = None;
     for days_ago in 0..=6 {
         let day = Utc::now() - Duration::days(days_ago);
         let dir = root
@@ -327,15 +433,23 @@ fn observe_codex(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
             if !codex_session_matches_cwd(&path, cwd)? {
                 continue;
             }
-            let mtime = entry.metadata()?.modified()?;
-            match &latest {
-                Some((_, existing_mtime)) if *existing_mtime >= mtime => {}
-                _ => latest = Some((path, mtime)),
+            let modified_at = DateTime::<Utc>::from(entry.metadata()?.modified()?);
+            if updated_after
+                .map(|cutoff| modified_at < cutoff)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            match &selected {
+                Some((_, existing_modified))
+                    if (prefer_earliest && *existing_modified <= modified_at)
+                        || (!prefer_earliest && *existing_modified >= modified_at) => {}
+                _ => selected = Some((path, modified_at)),
             }
         }
     }
 
-    let Some((session, mtime)) = latest else {
+    let Some((session, modified_at)) = selected else {
         return Ok(None);
     };
     let (progress_summary, turn_state, last_turn_completed_at) =
@@ -343,7 +457,7 @@ fn observe_codex(cwd: &str) -> anyhow::Result<Option<HarnessObservation>> {
     Ok(Some(HarnessObservation {
         session_path: Some(session.to_string_lossy().to_string()),
         progress_summary,
-        updated_at: Some(DateTime::<Utc>::from(mtime)),
+        updated_at: Some(modified_at),
         turn_state,
         last_turn_completed_at,
     }))
@@ -590,9 +704,18 @@ mod test {
 
     #[test]
     fn infers_harness_from_launch_command_or_foreground_process() {
-        assert_eq!(infer_harness("codex --model gpt-5", None), AgentHarness::Codex);
-        assert_eq!(infer_harness("python agent.py", Some("claude")), AgentHarness::Claude);
-        assert_eq!(infer_harness("python agent.py", None), AgentHarness::Unknown);
+        assert_eq!(
+            infer_harness("codex --model gpt-5", None),
+            AgentHarness::Codex
+        );
+        assert_eq!(
+            infer_harness("python agent.py", Some("claude")),
+            AgentHarness::Claude
+        );
+        assert_eq!(
+            infer_harness("python agent.py", None),
+            AgentHarness::Unknown
+        );
     }
 
     #[test]
@@ -642,11 +765,14 @@ mod test {
         .unwrap();
 
         set_env_path("WEZTERM_AGENT_CLAUDE_DIR", temp.path());
-        let observed = observe_claude(cwd).unwrap().unwrap();
+        let observed = observe_claude(cwd, None, None).unwrap().unwrap();
         remove_env_var("WEZTERM_AGENT_CLAUDE_DIR");
 
         assert_eq!(observed.progress_summary.as_deref(), Some("done"));
-        assert_eq!(observed.session_path.as_deref(), Some(session.to_string_lossy().as_ref()));
+        assert_eq!(
+            observed.session_path.as_deref(),
+            Some(session.to_string_lossy().as_ref())
+        );
         assert_eq!(observed.turn_state, AgentTurnState::WaitingOnUser);
         assert_eq!(
             observed.last_turn_completed_at,
@@ -677,11 +803,16 @@ mod test {
         .unwrap();
 
         set_env_path("WEZTERM_AGENT_CODEX_DIR", temp.path());
-        let observed = observe_codex("/tmp/project-b").unwrap().unwrap();
+        let observed = observe_codex("/tmp/project-b", None, None)
+            .unwrap()
+            .unwrap();
         remove_env_var("WEZTERM_AGENT_CODEX_DIR");
 
         assert_eq!(observed.progress_summary.as_deref(), Some("all good"));
-        assert_eq!(observed.session_path.as_deref(), Some(session.to_string_lossy().as_ref()));
+        assert_eq!(
+            observed.session_path.as_deref(),
+            Some(session.to_string_lossy().as_ref())
+        );
         assert_eq!(observed.turn_state, AgentTurnState::WaitingOnUser);
         assert_eq!(
             observed.last_turn_completed_at,
@@ -719,11 +850,104 @@ mod test {
             managed_checkout: false,
         };
         let mut runtime = AgentRuntimeSnapshot::new(&metadata);
+        runtime.foreground_process_name = Some("claude".to_string());
         refresh_runtime_from_harness(&mut runtime, &metadata);
         remove_env_var("WEZTERM_AGENT_CLAUDE_DIR");
 
         assert_eq!(runtime.turn_state, AgentTurnState::WaitingOnAgent);
         assert_eq!(runtime.last_turn_completed_at, None);
         assert_eq!(runtime.transport, AgentTransport::ObservedPty);
+    }
+
+    #[test]
+    fn refresh_runtime_does_not_bind_harness_session_before_process_matches() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let day = Utc::now();
+        let dir = temp
+            .path()
+            .join(format!("{:04}", day.year_ce().1))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("rollout-test.jsonl");
+        fs::write(
+            &session,
+            concat!(
+                "{\"payload\":{\"cwd\":\"/tmp/project-d\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:03Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"old\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        set_env_path("WEZTERM_AGENT_CODEX_DIR", temp.path());
+        let metadata = AgentMetadata {
+            agent_id: "id".to_string(),
+            name: "delta".to_string(),
+            launch_cmd: "codex".to_string(),
+            declared_cwd: "/tmp/project-d".to_string(),
+            created_at: Utc::now(),
+            repo_root: None,
+            worktree: None,
+            branch: None,
+            managed_checkout: false,
+        };
+        let mut runtime = AgentRuntimeSnapshot::new(&metadata);
+        runtime.foreground_process_name = Some("zsh".to_string());
+        runtime.observer_started_at = Some(Utc::now() - Duration::minutes(1));
+        refresh_runtime_from_harness(&mut runtime, &metadata);
+        remove_env_var("WEZTERM_AGENT_CODEX_DIR");
+
+        assert_eq!(runtime.harness, AgentHarness::Codex);
+        assert_eq!(runtime.transport, AgentTransport::PlainPty);
+        assert_eq!(runtime.session_path, None);
+        assert_eq!(runtime.turn_state, AgentTurnState::Unknown);
+    }
+
+    #[test]
+    fn observe_codex_prefers_bound_session_over_newer_same_cwd_session() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let day = Utc::now();
+        let dir = temp
+            .path()
+            .join(format!("{:04}", day.year_ce().1))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        fs::create_dir_all(&dir).unwrap();
+        let older = dir.join("rollout-older.jsonl");
+        fs::write(
+            &older,
+            concat!(
+                "{\"payload\":{\"cwd\":\"/tmp/project-e\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:03Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"older\"}]}}\n"
+            ),
+        )
+        .unwrap();
+        let newer = dir.join("rollout-newer.jsonl");
+        fs::write(
+            &newer,
+            concat!(
+                "{\"payload\":{\"cwd\":\"/tmp/project-e\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:04Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"newer\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        set_env_path("WEZTERM_AGENT_CODEX_DIR", temp.path());
+        let observed = observe_codex(
+            "/tmp/project-e",
+            Some(older.to_string_lossy().as_ref()),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        remove_env_var("WEZTERM_AGENT_CODEX_DIR");
+
+        assert_eq!(observed.progress_summary.as_deref(), Some("older"));
+        assert_eq!(
+            observed.session_path.as_deref(),
+            Some(older.to_string_lossy().as_ref())
+        );
     }
 }

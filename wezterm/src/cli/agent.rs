@@ -33,7 +33,10 @@ pub struct AgentCommand {
 
 #[derive(Debug, Subcommand, Clone)]
 enum AgentSubCommand {
-    #[command(name = "start", about = "start a managed agent in the current pane, a split, a new tab, or a new window")]
+    #[command(
+        name = "start",
+        about = "start a managed agent in the current pane, a split, a new tab, or a new window"
+    )]
     Start(SpawnAgentCommand),
 
     #[command(name = "adopt", about = "adopt an existing pane as a managed agent")]
@@ -271,11 +274,12 @@ impl SpawnAgentCommand {
             Option<String>,
         ) -> anyhow::Result<PreparedAgentLaunch>,
     {
-        let context_pane_id = if self.here || self.split || self.pane_id.is_some() || !self.new_window {
-            Some(resolve_pane_id(self.pane_id).await?)
-        } else {
-            None
-        };
+        let context_pane_id =
+            if self.here || self.split || self.pane_id.is_some() || !self.new_window {
+                Some(resolve_pane_id(self.pane_id).await?)
+            } else {
+                None
+            };
 
         let panes = if context_pane_id.is_some() {
             Some(list_panes().await?)
@@ -502,7 +506,7 @@ impl SpawnAgentCommand {
         let harness = infer_harness(&self.cmd, None);
         anyhow::ensure!(
             !matches!(harness, AgentHarness::Unknown),
-            "agent spawn requires a recognized harness command (currently: codex, claude); use agent adopt for generic panes"
+            "agent start requires a recognized harness command (currently: codex, claude); use agent adopt for generic panes"
         );
 
         let repo_root = self
@@ -585,20 +589,14 @@ fn ensure_agent_name_available(
 }
 
 fn next_available_agent_name(agents: &[AgentSnapshot], base_name: &str) -> String {
-    if !agents
-        .iter()
-        .any(|agent| agent.metadata.name == base_name)
-    {
+    if !agents.iter().any(|agent| agent.metadata.name == base_name) {
         return base_name.to_string();
     }
 
     let mut suffix = 2usize;
     loop {
         let candidate = format!("{base_name}{suffix}");
-        if !agents
-            .iter()
-            .any(|agent| agent.metadata.name == candidate)
-        {
+        if !agents.iter().any(|agent| agent.metadata.name == candidate) {
             return candidate;
         }
         suffix += 1;
@@ -620,7 +618,7 @@ fn resolve_spawn_agent_name(
         AgentHarness::Claude => "claude",
         AgentHarness::Unknown => {
             bail!(
-                "agent spawn requires a recognized harness command (currently: codex, claude); use agent adopt for generic panes"
+                "agent start requires a recognized harness command (currently: codex, claude); use agent adopt for generic panes"
             )
         }
     };
@@ -1106,7 +1104,10 @@ impl SendAgentCommand {
             });
         }
 
-        if !matches!(baseline_agent.runtime.transport, AgentTransport::ObservedPty) {
+        if !matches!(
+            baseline_agent.runtime.transport,
+            AgentTransport::ObservedPty
+        ) {
             return Ok(AgentSendAcknowledgement {
                 kind: AgentAckKind::Unavailable,
                 acknowledged: false,
@@ -1126,7 +1127,12 @@ impl SendAgentCommand {
                 .agents
                 .into_iter()
                 .find(|agent| agent.metadata.agent_id == baseline_agent.metadata.agent_id)
-                .ok_or_else(|| anyhow::anyhow!("agent {} disappeared while waiting for acknowledgement", baseline_agent.metadata.name))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "agent {} disappeared while waiting for acknowledgement",
+                        baseline_agent.metadata.name
+                    )
+                })?;
 
             if baseline.is_acknowledged_by(&agent) {
                 return Ok(AgentSendAcknowledgement {
@@ -1698,6 +1704,7 @@ mod test {
                 progress_summary: None,
                 terminal_progress: wezterm_term::Progress::None,
                 observer_error: None,
+                observer_started_at: None,
             },
             pane_id,
             tab_id: 20,
@@ -1772,7 +1779,8 @@ mod test {
         let mut baseline = sample_agent(30, "reviewer");
         baseline.runtime.transport = mux::agent::AgentTransport::ObservedPty;
         baseline.runtime.session_path = Some("/tmp/reviewer.jsonl".to_string());
-        baseline.runtime.last_progress_at = Some(Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap());
+        baseline.runtime.last_progress_at =
+            Some(Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap());
 
         let mut acknowledged = baseline.clone();
         acknowledged.runtime.last_progress_at =
@@ -1901,7 +1909,9 @@ mod test {
                 let mut agent = sample_agent(30, "reviewer");
                 agent.runtime.transport = mux::agent::AgentTransport::ObservedPty;
                 agent.runtime.session_path = Some("/tmp/reviewer.jsonl".to_string());
-                Ok(ListAgentsResponse { agents: vec![agent] })
+                Ok(ListAgentsResponse {
+                    agents: vec![agent],
+                })
             },
             |_| async { panic!("write_to_pane should not be used") },
             {
@@ -2487,7 +2497,7 @@ mod test {
         let err = command.prepare_launch("shell", &[], None).unwrap_err();
         assert!(err
             .to_string()
-            .contains("agent spawn requires a recognized harness command"));
+            .contains("agent start requires a recognized harness command"));
     }
 
     #[test]
