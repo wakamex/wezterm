@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 #![allow(clippy::range_plus_one)]
 
-use anyhow::{Context as _, Error, bail};
+use anyhow::{bail, Context as _, Error};
 use config::keyassignment::{PaneDirection, ScrollbackEraseMode};
 use mux::agent::{AgentMetadata, AgentSnapshot, AgentTabBadgeState};
 use mux::client::{ClientId, ClientInfo, ClientViewId, ClientWindowViewState};
@@ -916,11 +916,49 @@ pub struct TabResized {
     pub tab_id: TabId,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Debug)]
+#[derive(Serialize, PartialEq, Debug)]
 pub struct TabTitleChanged {
     pub tab_id: TabId,
     pub title: String,
     pub badge: AgentTabBadgeState,
+}
+
+impl<'de> Deserialize<'de> for TabTitleChanged {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TabTitleChangedVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TabTitleChangedVisitor {
+            type Value = TabTitleChanged;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a TabTitleChanged struct")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let tab_id = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let title = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                let badge = seq.next_element()?.unwrap_or_default();
+
+                Ok(TabTitleChanged {
+                    tab_id,
+                    title,
+                    badge,
+                })
+            }
+        }
+
+        deserializer.deserialize_tuple(2, TabTitleChangedVisitor)
+    }
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
@@ -1279,6 +1317,12 @@ mod test {
     use mux::tab::{PaneEntry, SplitDirection, SplitDirectionAndSize};
     use std::collections::HashMap;
 
+    #[derive(Deserialize, Serialize, PartialEq, Debug)]
+    struct LegacyTabTitleChanged {
+        tab_id: TabId,
+        title: String,
+    }
+
     fn leaf(window_id: WindowId, tab_id: TabId, pane_id: PaneId, size: TerminalSize) -> PaneNode {
         PaneNode::Leaf(PaneEntry {
             window_id,
@@ -1534,6 +1578,47 @@ mod test {
                 pdu: Pdu::Pong(Pong {})
             },
             Pdu::decode(encoded.as_slice()).unwrap()
+        );
+    }
+
+    #[test]
+    fn tab_title_changed_accepts_legacy_payload_without_badge() {
+        let legacy = LegacyTabTitleChanged {
+            tab_id: 7,
+            title: "wezterm".to_string(),
+        };
+        let (data, is_compressed) = serialize(&legacy).unwrap();
+        let decoded: TabTitleChanged = deserialize(data.as_slice(), is_compressed).unwrap();
+
+        assert_eq!(
+            decoded,
+            TabTitleChanged {
+                tab_id: 7,
+                title: "wezterm".to_string(),
+                badge: AgentTabBadgeState::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn tab_title_changed_legacy_decoder_ignores_badge() {
+        let current = TabTitleChanged {
+            tab_id: 7,
+            title: "wezterm".to_string(),
+            badge: AgentTabBadgeState {
+                waiting_on_user: true,
+                needs_attention: true,
+            },
+        };
+        let (data, is_compressed) = serialize(&current).unwrap();
+        let decoded: LegacyTabTitleChanged = deserialize(data.as_slice(), is_compressed).unwrap();
+
+        assert_eq!(
+            decoded,
+            LegacyTabTitleChanged {
+                tab_id: 7,
+                title: "wezterm".to_string(),
+            }
         );
     }
 
