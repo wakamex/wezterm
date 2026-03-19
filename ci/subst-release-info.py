@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import json
-import sys
+import pathlib
 import re
 
 CATEGORIZE = {
@@ -24,8 +24,13 @@ CATEGORIZE = {
     r"alpine(\d+)\.(\d+)(:?-\S+)?.apk": "alpine\\1_\\2_apk",
 }
 
+RELEASES_PAGE = "https://github.com/wakamex/wakterm/releases"
+
 
 def categorize(rel):
+    if rel is None or "tag_name" not in rel or "assets" not in rel:
+        return {}
+
     downloads = {}
 
     tag_name = "wakterm-%s" % rel["tag_name"]
@@ -57,6 +62,34 @@ def build_subst(subst, stable, categorized):
         subst[f"{kind}_dir"] = dir
 
 
+def fallback_subst():
+    subst = {}
+    docs_dir = pathlib.Path("docs")
+    pattern = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
+
+    for page in docs_dir.rglob("*.md"):
+        for key in pattern.findall(page.read_text()):
+            if key.endswith("_asset"):
+                subst[key] = "See releases page"
+            elif key.endswith("_dir"):
+                subst[key] = "wakterm-no-release-yet"
+            else:
+                subst[key] = RELEASES_PAGE
+
+    return subst
+
+
+def pick_latest_stable_release(release_info):
+    for rel in release_info:
+        if not isinstance(rel, dict):
+            continue
+        if rel.get("prerelease"):
+            continue
+        if "tag_name" in rel and "assets" in rel:
+            return rel
+    return None
+
+
 def load_release_info():
     with open("/tmp/wakterm.releases.json") as f:
         release_info = json.load(f)
@@ -64,27 +97,12 @@ def load_release_info():
     with open("/tmp/wakterm.nightly.json") as f:
         nightly = json.load(f)
 
-    latest = None
-    for rel in release_info:
-        if type(rel) is str:
-            print("Error", pretty(release_info))
-            raise Exception("Error obtaining release info")
+    latest = pick_latest_stable_release(release_info if isinstance(release_info, list) else [])
+    nightly = nightly if isinstance(nightly, dict) and "tag_name" in nightly and "assets" in nightly else None
 
-        # print(pretty(rel))
-        if rel["prerelease"]:
-            continue
-        latest = rel
-        break
-
-    latest = categorize(latest)
-    nightly = categorize(nightly)
-
-    # print("latest: ", pretty(latest))
-    # print("nightly: ", pretty(nightly))
-
-    subst = {}
-    build_subst(subst, "stable", latest)
-    build_subst(subst, "nightly", nightly)
+    subst = fallback_subst()
+    build_subst(subst, "stable", categorize(latest))
+    build_subst(subst, "nightly", categorize(nightly))
 
     with open(f"docs/releases.json", "w") as output:
         json.dump(subst, output)
