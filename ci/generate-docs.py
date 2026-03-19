@@ -136,7 +136,6 @@ class GenColorScheme(object):
         with open("colorschemes/data.json") as f:
             scheme_data = json.load(f)
         schemes = []
-        by_prefix = {}
         for raw in scheme_data:
             scheme = load_scheme(raw)
             entry = {
@@ -158,40 +157,12 @@ class GenColorScheme(object):
                 "brights": scheme["brights"],
             }
             schemes.append(entry)
-            by_prefix.setdefault(entry["prefix"], []).append(entry)
 
         schemes.sort(key=lambda item: item["name"].lower())
 
         os.makedirs(self.dirname, exist_ok=True)
         with open(f"{self.dirname}/catalog.json", "w") as catalog:
             json.dump(schemes, catalog)
-
-        for scheme_prefix in sorted(by_prefix.keys()):
-            scheme_filename = f"{self.dirname}/{scheme_prefix}/index.md"
-            os.makedirs(os.path.dirname(scheme_filename), exist_ok=True)
-            with open(scheme_filename, "w") as idx:
-                upper = scheme_prefix.upper()
-                idx.write(
-                    f"""---
-title: Color Schemes "{upper}"
----
-
-The main experience now lives in the
-[Color Scheme Browser](../index.md?prefix={scheme_prefix}), but this
-lightweight page preserves direct links to the older letter-based sections.
-
-"""
-                )
-                for scheme in by_prefix[scheme_prefix]:
-                    idx.write(f"## {scheme['name']}\n\n")
-                    idx.write(
-                        f"[Open in the Color Scheme Browser](../index.md?prefix={scheme_prefix}&scheme={scheme['ident']})\n\n"
-                    )
-                    idx.write("```lua\n")
-                    idx.write(
-                        f"config.color_scheme = {json.dumps(scheme['name'])}\n"
-                    )
-                    idx.write("```\n\n")
 
         index_filename = f"{self.dirname}/index.md"
         index_page = Page(self.title, index_filename)

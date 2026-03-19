@@ -72,7 +72,6 @@ exclude_docs: |
 
 not_in_nav: |
   tags.md
-  colorschemes/*/index.md
 
 extra_css:
   - style.css
