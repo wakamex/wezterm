@@ -13,7 +13,7 @@
 
 use anyhow::{bail, Context as _, Error};
 use config::keyassignment::{PaneDirection, ScrollbackEraseMode};
-use mux::client::{ClientId, ClientInfo};
+use mux::client::{ClientId, ClientInfo, ClientViewId, ClientWindowViewState};
 use mux::pane::PaneId;
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::{PaneNode, SerdeUrl, SplitRequest, TabId};
@@ -462,7 +462,7 @@ macro_rules! pdu {
 /// The overall version of the codec.
 /// This must be bumped when backwards incompatible changes
 /// are made to the types and protocol.
-pub const CODEC_VERSION: usize = 48;
+pub const CODEC_VERSION: usize = 49;
 
 /// Maximum size of a single PDU in bytes (64 MiB).
 /// Rejects PDUs with a length field larger than this before allocating,
@@ -530,6 +530,7 @@ pdu! {
     AdjustPaneSize: 62,
     ResizeTab: 63,
     RotatePanes: 64,
+    SetClientActiveTab: 65,
 }
 
 impl Pdu {
@@ -675,7 +676,7 @@ pub struct ListPanesResponse {
     pub tabs: Vec<PaneNode>,
     pub tab_titles: Vec<String>,
     pub window_titles: HashMap<WindowId, String>,
-    pub active_tabs: HashMap<WindowId, TabId>,
+    pub client_window_view_state: HashMap<WindowId, ClientWindowViewState>,
 }
 
 impl ListPanesResponse {
@@ -753,6 +754,9 @@ pub struct SpawnV2 {
     pub domain: config::keyassignment::SpawnTabDomain,
     /// If None, create a new window for this new tab
     pub window_id: Option<WindowId>,
+    /// Explicit source pane for existing-window spawns.
+    /// Required when `window_id` is set.
+    pub current_pane_id: Option<PaneId>,
     pub command: Option<CommandBuilder>,
     pub command_dir: Option<String>,
     /// The authoritative target tab size supplied by the caller.
@@ -911,12 +915,19 @@ pub struct WindowWorkspaceChanged {
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct SetClientId {
     pub client_id: ClientId,
+    pub view_id: ClientViewId,
     pub is_proxy: bool,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct SetFocusedPane {
     pub pane_id: PaneId,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct SetClientActiveTab {
+    pub window_id: WindowId,
+    pub tab_id: TabId,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
@@ -1272,7 +1283,7 @@ mod test {
             tabs,
             tab_titles: vec![],
             window_titles: HashMap::new(),
-            active_tabs: HashMap::new(),
+            client_window_view_state: HashMap::new(),
         }
     }
 

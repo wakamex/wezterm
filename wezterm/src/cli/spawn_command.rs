@@ -152,6 +152,7 @@ impl SpawnCommand {
                 SpawnTabDomain::DomainName(name)
             }),
             window_id,
+            current_pane_id: pane_id,
             command: if prog.is_empty() {
                 None
             } else {
@@ -213,7 +214,7 @@ mod test {
             tabs,
             tab_titles: vec![],
             window_titles: HashMap::new(),
-            active_tabs: HashMap::new(),
+            client_window_view_state: HashMap::new(),
         }
     }
 
@@ -293,6 +294,7 @@ mod test {
 
         assert_eq!(response.window_id, 7);
         assert_eq!(request.window_id, Some(7));
+        assert_eq!(request.current_pane_id, Some(13));
         assert_eq!(request.size, root);
         assert_ne!(request.size, left);
     }
@@ -356,6 +358,7 @@ mod test {
 
         assert_eq!(*resolve_calls.borrow(), 0);
         assert_eq!(request.window_id, Some(9));
+        assert_eq!(request.current_pane_id, None);
         assert_eq!(request.size, root);
     }
 
@@ -402,6 +405,7 @@ mod test {
         let request = request.as_ref().unwrap();
 
         assert_eq!(request.window_id, None);
+        assert_eq!(request.current_pane_id, None);
         assert_eq!(request.size, expected);
     }
 }

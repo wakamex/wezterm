@@ -7,7 +7,7 @@ use codec::*;
 use config::{configuration, SshDomain, TlsDomainClient, UnixDomain, UnixTarget};
 use filedescriptor::FileDescriptor;
 use futures::FutureExt;
-use mux::client::ClientId;
+use mux::client::{ClientId, ClientViewId};
 use mux::connui::ConnectionUI;
 use mux::domain::DomainId;
 use mux::pane::PaneId;
@@ -56,6 +56,7 @@ pub struct Client {
     sender: Sender<ReaderMessage>,
     local_domain_id: Option<DomainId>,
     pub client_id: ClientId,
+    pub view_id: ClientViewId,
     client_domain_config: ClientDomainConfig,
     pub is_reconnectable: bool,
     pub is_local: bool,
@@ -1067,6 +1068,7 @@ impl Client {
         let is_local = reconnectable.is_local();
         let (sender, mut receiver) = unbounded();
         let client_id = ClientId::new();
+        let view_id = ClientViewId::persistent();
 
         thread::spawn(move || {
             const BASE_INTERVAL: Duration = Duration::from_secs(1);
@@ -1160,6 +1162,7 @@ impl Client {
             is_reconnectable,
             is_local,
             client_id,
+            view_id,
             client_domain_config,
         }
     }
@@ -1188,6 +1191,7 @@ impl Client {
                 );
                 self.set_client_id(SetClientId {
                     client_id: self.client_id.clone(),
+                    view_id: self.view_id.clone(),
                     is_proxy: false,
                 })
                 .await?;
@@ -1401,6 +1405,7 @@ impl Client {
     rpc!(set_client_id, SetClientId, UnitResponse);
     rpc!(list_clients, GetClientList = (), GetClientListResponse);
     rpc!(set_window_workspace, SetWindowWorkspace, UnitResponse);
+    rpc!(set_client_active_tab, SetClientActiveTab, UnitResponse);
     rpc!(set_focused_pane_id, SetFocusedPane, UnitResponse);
     rpc!(get_image_cell, GetImageCell, GetImageCellResponse);
     rpc!(set_configured_palette_for_pane, SetPalette, UnitResponse);
@@ -1414,4 +1419,24 @@ impl Client {
         GetPaneDirectionResponse
     );
     rpc!(adjust_pane_size, AdjustPaneSize, UnitResponse);
+}
+
+#[cfg(test)]
+impl Client {
+    pub(crate) fn new_for_test(
+        local_domain_id: DomainId,
+        client_id: ClientId,
+        view_id: ClientViewId,
+    ) -> Self {
+        let (sender, _rx) = smol::channel::unbounded();
+        Self {
+            sender,
+            local_domain_id: Some(local_domain_id),
+            client_id,
+            view_id,
+            client_domain_config: ClientDomainConfig::Unix(UnixDomain::default()),
+            is_reconnectable: false,
+            is_local: false,
+        }
+    }
 }

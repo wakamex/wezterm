@@ -76,11 +76,11 @@ impl UserData for MuxWindow {
             let mux = get_mux()?;
             let window = this.resolve(&mux)?;
             let result = lua.create_table()?;
-            let active_idx = window.get_active_idx();
+            let active_idx = mux.get_active_tab_idx_for_window_for_current_identity(this.0);
             for (index, tab) in window.iter().enumerate() {
                 let info = MuxTabInfo {
                     index,
-                    is_active: index == active_idx,
+                    is_active: active_idx == Some(index),
                 };
                 let info = luahelper::dynamic_to_lua_value(lua, info.to_dynamic())?;
                 match &info {
@@ -95,15 +95,15 @@ impl UserData for MuxWindow {
         });
         methods.add_method("active_tab", |_, this, _: ()| {
             let mux = get_mux()?;
-            let window = this.resolve(&mux)?;
-            Ok(window.get_active().map(|tab| MuxTab(tab.tab_id())))
+            Ok(mux
+                .get_active_tab_for_window_for_current_identity(this.0)
+                .map(|tab| MuxTab(tab.tab_id())))
         });
         methods.add_method("active_pane", |_, this, _: ()| {
             let mux = get_mux()?;
-            let window = this.resolve(&mux)?;
-            Ok(window
-                .get_active()
-                .and_then(|tab| tab.get_active_pane().map(|pane| MuxPane(pane.pane_id()))))
+            Ok(mux
+                .get_active_pane_for_window_for_current_identity(this.0)
+                .map(|pane| MuxPane(pane.pane_id())))
         });
     }
 }

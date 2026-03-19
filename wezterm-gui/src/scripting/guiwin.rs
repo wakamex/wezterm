@@ -47,10 +47,9 @@ impl UserData for GuiWin {
         });
         methods.add_method("active_tab", |_, this, _: ()| {
             let mux = Mux::try_get().ok_or_else(|| mlua::Error::external("cannot get Mux!?"))?;
-            let window = mux.get_window(this.mux_window_id).ok_or_else(|| {
-                mlua::Error::external(format!("invalid window {}", this.mux_window_id))
-            })?;
-            Ok(window.get_active().map(|tab| mux_lua::MuxTab(tab.tab_id())))
+            Ok(mux
+                .get_active_tab_for_window_for_current_identity(this.mux_window_id)
+                .map(|tab| mux_lua::MuxTab(tab.tab_id())))
         });
 
         methods.add_method(
