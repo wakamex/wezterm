@@ -75,12 +75,8 @@ not_in_nav: |
 
 extra_css:
   - style.css
-  - colorschemes/scheme.css
-  - asciinema-player.css
 extra_javascript:
-  - asciinema-player.min.js
   - javascript/fix-codeblock-console-copy-button.js
-  - colorschemes/scheme.js
 
 markdown_extensions:
   - admonition

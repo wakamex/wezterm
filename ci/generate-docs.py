@@ -249,6 +249,11 @@ function load_scheme_player(ident) {{
 title: Color Schemes with first letter "{scheme_prefix}"
 ---
 
+<link rel="stylesheet" href="/asciinema-player.css">
+<link rel="stylesheet" href="/colorschemes/scheme.css">
+<script defer src="/asciinema-player.min.js"></script>
+<script defer src="/colorschemes/scheme.js"></script>
+
 """
                 )
 
