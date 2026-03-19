@@ -1,4 +1,4 @@
-name: pages
+name: cloudflare-pages
 
 on:
   push:
@@ -6,28 +6,27 @@ on:
       - main
     paths:
       - "docs/**"
+      - "assets/fonts/SymbolsNerdFontMono-Regular.ttf"
+      - "assets/icon/terminal.png"
+      - "assets/icon/wakterm-icon.svg"
       - "ci/build-docs.sh"
+      - "ci/Dockerfile.docs"
       - "ci/generate-docs.py"
       - "ci/subst-release-info.py"
+      - "mkdocs_macros.py"
+      - "wrangler.toml"
       - ".github/workflows/pages.yml"
-  schedule:
-    - cron: "50 * * * *"
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
-  pages: write
-  id-token: write
-  actions: read
 
 concurrency:
-  group: "pages"
+  group: "cloudflare-pages-production"
+  cancel-in-progress: true
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     if: github.repository == 'wakamex/wakterm'
     steps:
@@ -42,29 +41,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - uses: actions/cache@v4
         with:
           key: ${{ github.ref }}
           path: .cache
-      - name: Build
+      - name: Build docs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           source $HOME/.cargo/env
           CARDS=true ./ci/build-docs.sh
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: gh_pages
-
-  deploy:
-    if: github.repository == 'wakamex/wakterm'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npx wrangler@4.69.0 pages deploy gh_pages \
+            --branch main \
+            --commit-hash "${GITHUB_SHA}" \
+            --commit-message "${{ github.event.head_commit.message || github.sha }}"
