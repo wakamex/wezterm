@@ -825,7 +825,7 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         PromptRenameTab => CommandDef {
             brief: "Rename current tab".into(),
             doc: "Prompts for a new title for the current tab".into(),
-            keys: vec![],
+            keys: vec![(Modifiers::SUPER, "e".into())],
             args: &[ArgType::ActiveTab],
             menubar: &["Window"],
             icon: Some("md_rename_box"),
@@ -2084,6 +2084,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         SetWindowLevel(WindowLevel::Normal),
         SetWindowLevel(WindowLevel::AlwaysOnTop),
         Hide,
+        PromptRenameTab,
         Search(Pattern::CurrentSelectionOrEmptyString),
         PaneSelect(PaneSelectArguments {
             alphabet: String::new(),
