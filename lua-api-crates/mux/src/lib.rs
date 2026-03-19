@@ -286,9 +286,9 @@ impl SpawnTab {
                 .map(|tab| tab.get_size())
                 .unwrap_or_else(|| config::configuration().initial_size(0, None));
 
-            pane = window
-                .get_active()
-                .and_then(|tab| tab.get_active_pane().map(|pane| pane.pane_id()));
+            pane = mux
+                .get_active_pane_for_window_for_current_identity(window.window_id())
+                .map(|pane| pane.pane_id());
         };
 
         let (cmd_builder, cwd) = self.cmd_builder.to_command_builder();

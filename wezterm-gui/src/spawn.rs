@@ -48,11 +48,8 @@ pub async fn spawn_command_internal(
 
     let current_pane_id = match src_window_id {
         Some(window_id) => {
-            if let Some(tab) = mux.get_active_tab_for_window(window_id) {
-                tab.get_active_pane().map(|p| p.pane_id())
-            } else {
-                None
-            }
+            mux.get_active_pane_for_window_for_current_identity(window_id)
+                .map(|p| p.pane_id())
         }
         None => None,
     };
@@ -95,7 +92,7 @@ pub async fn spawn_command_internal(
 
     if trace_enabled {
         let active_before = src_window_id
-            .and_then(|window_id| mux.get_active_tab_for_window(window_id))
+            .and_then(|window_id| mux.get_active_tab_for_window_for_current_identity(window_id))
             .map(|tab| tab.debug_size_snapshot())
             .unwrap_or_else(|| "none".to_string());
         log::warn!(
@@ -114,9 +111,12 @@ pub async fn spawn_command_internal(
                 Some(id) => id,
                 None => anyhow::bail!("no src window when splitting a pane?"),
             };
-            if let Some(tab) = mux.get_active_tab_for_window(src_window_id) {
-                let pane = tab
-                    .get_active_pane()
+            if mux
+                .get_active_tab_for_window_for_current_identity(src_window_id)
+                .is_some()
+            {
+                let pane = mux
+                    .get_active_pane_for_window_for_current_identity(src_window_id)
                     .ok_or_else(|| anyhow!("tab to have a pane"))?;
 
                 log::trace!("doing split_pane");
@@ -136,7 +136,7 @@ pub async fn spawn_command_internal(
                 pane.set_config(term_config);
                 if trace_enabled {
                     let after = mux
-                        .get_active_tab_for_window(src_window_id)
+                        .get_active_tab_for_window_for_current_identity(src_window_id)
                         .map(|tab| tab.debug_size_snapshot())
                         .unwrap_or_else(|| {
                             format!("window_id={} missing active tab", src_window_id)
@@ -178,7 +178,7 @@ pub async fn spawn_command_internal(
             }
             if trace_enabled {
                 let active_after = mux
-                    .get_active_tab_for_window(window_id)
+                    .get_active_tab_for_window_for_current_identity(window_id)
                     .map(|active| active.debug_size_snapshot())
                     .unwrap_or_else(|| format!("window_id={} missing active tab", window_id));
                 log::warn!(

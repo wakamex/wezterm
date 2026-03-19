@@ -247,18 +247,16 @@ pub struct PositionedSplit {
 }
 
 fn is_pane(pane: &Arc<dyn Pane>, other: &Option<&Arc<dyn Pane>>) -> bool {
-    if let Some(other) = other {
-        other.pane_id() == pane.pane_id()
-    } else {
-        false
-    }
+    other
+        .map(|other| other.pane_id() == pane.pane_id())
+        .unwrap_or(false)
 }
 
 fn pane_tree(
     tree: &Tree,
     tab_id: TabId,
     window_id: WindowId,
-    active: Option<&Arc<dyn Pane>>,
+    active_pane_id: Option<PaneId>,
     zoomed: Option<&Arc<dyn Pane>>,
     workspace: &str,
     left_col: usize,
@@ -270,13 +268,20 @@ fn pane_tree(
             let data = data.unwrap();
             PaneNode::Split {
                 left: Box::new(pane_tree(
-                    &*left, tab_id, window_id, active, zoomed, workspace, left_col, top_row,
+                    &*left,
+                    tab_id,
+                    window_id,
+                    active_pane_id,
+                    zoomed,
+                    workspace,
+                    left_col,
+                    top_row,
                 )),
                 right: Box::new(pane_tree(
                     &*right,
                     tab_id,
                     window_id,
-                    active,
+                    active_pane_id,
                     zoomed,
                     workspace,
                     if data.direction == SplitDirection::Vertical {
@@ -303,8 +308,10 @@ fn pane_tree(
                 tab_id,
                 pane_id: pane.pane_id(),
                 title: pane.get_title(),
-                is_active_pane: is_pane(pane, &active),
-                is_zoomed_pane: is_pane(pane, &zoomed),
+                is_active_pane: active_pane_id == Some(pane.pane_id()),
+                is_zoomed_pane: zoomed
+                    .map(|zoomed| zoomed.pane_id() == pane.pane_id())
+                    .unwrap_or(false),
                 size: TerminalSize {
                     cols: dims.cols,
                     rows: dims.viewport_rows,
@@ -785,6 +792,12 @@ impl Tab {
         self.inner.lock().codec_pane_tree()
     }
 
+    pub fn codec_pane_tree_with_active_pane_id(&self, active_pane_id: Option<PaneId>) -> PaneNode {
+        self.inner
+            .lock()
+            .codec_pane_tree_with_active_pane_id(active_pane_id)
+    }
+
     /// Returns a count of how many panes are in this tab
     pub fn count_panes(&self) -> Option<usize> {
         self.inner.try_lock().map(|mut inner| inner.count_panes())
@@ -1123,6 +1136,11 @@ impl TabInner {
     }
 
     fn codec_pane_tree(&mut self) -> PaneNode {
+        let active_pane_id = self.get_active_pane().map(|pane| pane.pane_id());
+        self.codec_pane_tree_with_active_pane_id(active_pane_id)
+    }
+
+    fn codec_pane_tree_with_active_pane_id(&mut self, active_pane_id: Option<PaneId>) -> PaneNode {
         let mux = Mux::get();
         let tab_id = self.id;
         let window_id = match mux.window_containing_tab(tab_id) {
@@ -1144,14 +1162,13 @@ impl TabInner {
             }
         };
 
-        let active = self.get_active_pane();
         let zoomed = self.zoomed.as_ref();
         if let Some(root) = self.pane.as_ref() {
             pane_tree(
                 root,
                 tab_id,
                 window_id,
-                active.as_ref(),
+                active_pane_id,
                 zoomed,
                 &workspace,
                 0,

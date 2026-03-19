@@ -9,8 +9,6 @@ pub type WindowId = usize;
 pub struct Window {
     id: WindowId,
     tabs: Vec<Arc<Tab>>,
-    active: usize,
-    last_active: Option<TabId>,
     workspace: String,
     title: String,
     initial_position: Option<GuiPosition>,
@@ -21,8 +19,6 @@ impl Window {
         Self {
             id: WIN_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed),
             tabs: vec![],
-            active: 0,
-            last_active: None,
             title: String::new(),
             workspace: workspace.unwrap_or_else(|| Mux::get().active_workspace()),
             initial_position,
@@ -118,100 +114,16 @@ impl Window {
         None
     }
 
-    fn fixup_active_tab_after_removal(&mut self, active: Option<Arc<Tab>>) {
-        let len = self.tabs.len();
-        if let Some(active) = active {
-            for (idx, tab) in self.tabs.iter().enumerate() {
-                if tab.tab_id() == active.tab_id() {
-                    self.set_active_without_saving(idx);
-                    return;
-                }
-            }
-        }
-
-        if len > 0 && self.active >= len {
-            self.set_active_without_saving(len - 1);
-        } else {
-            self.invalidate();
-        }
-    }
-
     pub fn remove_by_idx(&mut self, idx: usize) -> Arc<Tab> {
         self.invalidate();
-        let active = self.get_active().map(Arc::clone);
-        self.do_remove_idx(idx, active)
+        self.tabs.remove(idx)
     }
 
     pub fn remove_by_id(&mut self, id: TabId) {
-        let active = self.get_active().map(Arc::clone);
         if let Some(idx) = self.idx_by_id(id) {
-            self.do_remove_idx(idx, active);
+            self.tabs.remove(idx);
+            self.invalidate();
         }
-    }
-
-    fn do_remove_idx(&mut self, idx: usize, active: Option<Arc<Tab>>) -> Arc<Tab> {
-        if let (Some(active), Some(removing)) = (&active, self.tabs.get(idx)) {
-            if active.tab_id() == removing.tab_id()
-                && config::configuration().switch_to_last_active_tab_when_closing_tab
-            {
-                // If we are removing the active tab, switch back to
-                // the previously active tab
-                if let Some(last_active) = self.get_last_active_idx() {
-                    self.set_active_without_saving(last_active);
-                }
-            }
-        }
-        let tab = self.tabs.remove(idx);
-        self.fixup_active_tab_after_removal(active);
-        tab
-    }
-
-    pub fn get_active(&self) -> Option<&Arc<Tab>> {
-        self.get_by_idx(self.active)
-    }
-
-    #[inline]
-    pub fn get_active_idx(&self) -> usize {
-        self.active
-    }
-
-    pub fn save_last_active(&mut self) {
-        self.last_active = self.get_by_idx(self.active).map(|tab| tab.tab_id());
-    }
-
-    #[inline]
-    pub fn get_last_active_idx(&self) -> Option<usize> {
-        if let Some(tab_id) = self.last_active {
-            self.idx_by_id(tab_id)
-        } else {
-            None
-        }
-    }
-
-    /// If `idx` is different from the current active tab,
-    /// save the current tabid and then make `idx` the active
-    /// tab position.
-    pub fn save_and_then_set_active(&mut self, idx: usize) {
-        if idx == self.get_active_idx() {
-            return;
-        }
-        self.save_last_active();
-        self.set_active_without_saving(idx);
-    }
-
-    /// Make `idx` the active tab position.
-    /// The saved tab id is not changed.
-    pub fn set_active_without_saving(&mut self, idx: usize) {
-        assert!(idx < self.tabs.len());
-        if self.active != idx {
-            if let Some(tab) = self.tabs.get(self.active) {
-                if let Some(pane) = tab.get_active_pane() {
-                    pane.focus_changed(false);
-                }
-            }
-        }
-        self.active = idx;
-        self.invalidate();
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Arc<Tab>> {

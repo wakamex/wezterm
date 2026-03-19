@@ -25,7 +25,6 @@ pub struct SavedTab {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedWindow {
     pub workspace: String,
-    pub active_tab_index: usize,
     pub tabs: Vec<SavedTab>,
 }
 
@@ -36,10 +35,37 @@ pub struct SavedSession {
     pub windows: Vec<SavedWindow>,
 }
 
-const SESSION_VERSION: u32 = 2;
+const SESSION_VERSION: u32 = 3;
 
 fn session_path() -> PathBuf {
     config::RUNTIME_DIR.join("session.json")
+}
+
+fn build_saved_session(mux: &Mux) -> SavedSession {
+    let mut windows = Vec::new();
+
+    for window_id in mux.iter_windows() {
+        if let Some(window) = mux.get_window(window_id) {
+            let workspace = window.get_workspace().to_string();
+            let mut tabs = Vec::new();
+            for tab in window.iter() {
+                let title = tab.get_title();
+                let mut tree = tab.codec_pane_tree_with_active_pane_id(None);
+                // Fix any degenerate splits (< 3 cols/rows on one side)
+                // before saving, so the restore produces a usable layout
+                heal_tree(&mut tree);
+                tabs.push(SavedTab { title, tree });
+            }
+            if !tabs.is_empty() {
+                windows.push(SavedWindow { workspace, tabs });
+            }
+        }
+    }
+
+    SavedSession {
+        version: SESSION_VERSION,
+        windows,
+    }
 }
 
 /// Fix degenerate split sizes in a PaneNode tree before saving.
@@ -76,35 +102,7 @@ fn heal_tree(node: &mut PaneNode) {
 /// Save the current mux session to disk.
 pub fn save_session() -> anyhow::Result<PathBuf> {
     let mux = Mux::try_get().context("no mux instance")?;
-    let mut windows = Vec::new();
-
-    for window_id in mux.iter_windows() {
-        if let Some(window) = mux.get_window(window_id) {
-            let workspace = window.get_workspace().to_string();
-            let active_tab_index = window.get_active_idx();
-            let mut tabs = Vec::new();
-            for tab in window.iter() {
-                let title = tab.get_title();
-                let mut tree = tab.codec_pane_tree();
-                // Fix any degenerate splits (< 3 cols/rows on one side)
-                // before saving, so the restore produces a usable layout
-                heal_tree(&mut tree);
-                tabs.push(SavedTab { title, tree });
-            }
-            if !tabs.is_empty() {
-                windows.push(SavedWindow {
-                    workspace,
-                    active_tab_index,
-                    tabs,
-                });
-            }
-        }
-    }
-
-    let session = SavedSession {
-        version: SESSION_VERSION,
-        windows,
-    };
+    let session = build_saved_session(&mux);
 
     let path = session_path();
     let json = serde_json::to_string_pretty(&session)
@@ -188,13 +186,11 @@ pub async fn restore_session(
         let workspace = Some(saved_window.workspace.clone());
         let position = None;
         let window_id = mux.new_empty_window(workspace, position);
-        let mut restored_tabs = 0usize;
 
         for saved_tab in &saved_window.tabs {
             match restore_tab(domain, &saved_tab, default_size, *window_id).await {
                 Ok(()) => {
                     total_tabs += 1;
-                    restored_tabs += 1;
                 }
                 Err(err) => {
                     log::error!(
@@ -203,15 +199,6 @@ pub async fn restore_session(
                         err
                     );
                 }
-            }
-        }
-
-        if restored_tabs > 0 {
-            let active_tab_index = saved_window
-                .active_tab_index
-                .min(restored_tabs.saturating_sub(1));
-            if let Some(mut window) = mux.get_window_mut(*window_id) {
-                window.set_active_without_saving(active_tab_index);
             }
         }
     }
@@ -375,5 +362,240 @@ fn first_leaf_cwd(node: &PaneNode) -> Option<String> {
         PaneNode::Split { left, right, .. } => {
             first_leaf_cwd(left).or_else(|| first_leaf_cwd(right))
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::client::{ClientId, ClientViewId};
+    use crate::pane::{alloc_pane_id, CachePolicy, LogicalLine, Pane};
+    use crate::renderable::RenderableDimensions;
+    use crate::tab::{SplitDirection, SplitRequest, SplitSize, Tab};
+    use crate::Mux;
+    use rangeset::RangeSet;
+    use std::io::Write;
+    use std::ops::Range;
+    use std::sync::{Arc, Mutex};
+    use termwiz::surface::{CursorShape, CursorVisibility, Line, SequenceNo};
+    use url::Url;
+    use wezterm_term::color::ColorPalette;
+    use wezterm_term::{KeyCode, KeyModifiers, MouseEvent, StableRowIndex, TerminalSize};
+
+    struct TestPane {
+        id: crate::pane::PaneId,
+        size: Mutex<TerminalSize>,
+    }
+
+    impl TestPane {
+        fn new(id: crate::pane::PaneId, size: TerminalSize) -> Arc<dyn Pane> {
+            Arc::new(Self {
+                id,
+                size: Mutex::new(size),
+            })
+        }
+    }
+
+    impl Pane for TestPane {
+        fn pane_id(&self) -> crate::pane::PaneId {
+            self.id
+        }
+
+        fn get_cursor_position(&self) -> crate::renderable::StableCursorPosition {
+            crate::renderable::StableCursorPosition {
+                x: 0,
+                y: 0,
+                shape: CursorShape::Default,
+                visibility: CursorVisibility::Visible,
+            }
+        }
+
+        fn get_current_seqno(&self) -> SequenceNo {
+            0
+        }
+
+        fn get_changed_since(
+            &self,
+            _lines: Range<StableRowIndex>,
+            _seqno: SequenceNo,
+        ) -> RangeSet<StableRowIndex> {
+            RangeSet::new()
+        }
+
+        fn with_lines_mut(
+            &self,
+            _stable_range: Range<StableRowIndex>,
+            _with_lines: &mut dyn crate::pane::WithPaneLines,
+        ) {
+            unimplemented!()
+        }
+
+        fn for_each_logical_line_in_stable_range_mut(
+            &self,
+            _lines: Range<StableRowIndex>,
+            _for_line: &mut dyn crate::pane::ForEachPaneLogicalLine,
+        ) {
+            unimplemented!()
+        }
+
+        fn get_lines(&self, _lines: Range<StableRowIndex>) -> (StableRowIndex, Vec<Line>) {
+            (0, vec![])
+        }
+
+        fn get_logical_lines(&self, _lines: Range<StableRowIndex>) -> Vec<LogicalLine> {
+            vec![]
+        }
+
+        fn get_dimensions(&self) -> RenderableDimensions {
+            let size = self.size.lock().unwrap();
+            RenderableDimensions {
+                cols: size.cols,
+                viewport_rows: size.rows,
+                scrollback_rows: size.rows,
+                physical_top: 0,
+                scrollback_top: 0,
+                dpi: size.dpi,
+                pixel_width: size.pixel_width,
+                pixel_height: size.pixel_height,
+                reverse_video: false,
+            }
+        }
+
+        fn get_title(&self) -> String {
+            String::new()
+        }
+
+        fn send_paste(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+            Ok(None)
+        }
+
+        fn writer(&self) -> parking_lot::MappedMutexGuard<'_, dyn Write> {
+            unimplemented!()
+        }
+
+        fn resize(&self, size: TerminalSize) -> anyhow::Result<()> {
+            *self.size.lock().unwrap() = size;
+            Ok(())
+        }
+
+        fn key_down(&self, _key: KeyCode, _mods: KeyModifiers) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn key_up(&self, _key: KeyCode, _mods: KeyModifiers) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn mouse_event(&self, _event: MouseEvent) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_dead(&self) -> bool {
+            false
+        }
+
+        fn palette(&self) -> ColorPalette {
+            ColorPalette::default()
+        }
+
+        fn domain_id(&self) -> crate::domain::DomainId {
+            0
+        }
+
+        fn is_mouse_grabbed(&self) -> bool {
+            false
+        }
+
+        fn is_alt_screen_active(&self) -> bool {
+            false
+        }
+
+        fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
+            None
+        }
+    }
+
+    fn size(cols: usize, rows: usize) -> TerminalSize {
+        TerminalSize {
+            cols,
+            rows,
+            pixel_width: cols * 8,
+            pixel_height: rows * 18,
+            dpi: 96,
+        }
+    }
+
+    #[test]
+    fn saved_session_omits_per_client_active_state() {
+        let _test_lock = crate::TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = crate::TestMuxGuard;
+
+        let client_id = Arc::new(ClientId::new());
+        let view_id = Arc::new(ClientViewId("save-test".to_string()));
+        mux.register_client(client_id.clone(), view_id.clone());
+        let _identity = mux.with_identity(Some(client_id));
+
+        let window_id = *mux.new_empty_window(Some("default".to_string()), None);
+        let tab_size = size(120, 40);
+
+        let tab = Arc::new(Tab::new(&tab_size));
+        let left = TestPane::new(alloc_pane_id(), tab_size);
+        let left_pane_id = left.pane_id();
+        tab.assign_pane(&left);
+        let right = TestPane::new(alloc_pane_id(), tab_size);
+        let right_pane_id = right.pane_id();
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                target_is_second: true,
+                top_level: false,
+                size: SplitSize::Percent(50),
+            },
+            right,
+        )
+        .unwrap();
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_active_tab_for_client_view(view_id.as_ref(), window_id, tab.tab_id())
+            .unwrap();
+        mux.set_active_pane_for_client_view(view_id.as_ref(), window_id, tab.tab_id(), right_pane_id)
+            .unwrap();
+
+        let session = build_saved_session(&mux);
+        let json = serde_json::to_string(&session).unwrap();
+
+        assert_eq!(session.version, SESSION_VERSION);
+        assert_eq!(session.windows.len(), 1);
+        assert!(!json.contains("active_tab_index"));
+        assert!(!json.contains("\"is_active_pane\":true"));
+
+        let saved_tree = &session.windows[0].tabs[0].tree;
+        let mut leaves = vec![];
+        fn collect_leaves<'a>(node: &'a PaneNode, leaves: &mut Vec<&'a crate::tab::PaneEntry>) {
+            match node {
+                PaneNode::Empty => {}
+                PaneNode::Leaf(entry) => leaves.push(entry),
+                PaneNode::Split { left, right, .. } => {
+                    collect_leaves(left, leaves);
+                    collect_leaves(right, leaves);
+                }
+            }
+        }
+        collect_leaves(saved_tree, &mut leaves);
+        assert_eq!(leaves.len(), 2);
+        assert!(leaves.iter().all(|entry| !entry.is_active_pane));
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(view_id.as_ref(), window_id, tab.tab_id()),
+            Some(right_pane_id)
+        );
+        assert_ne!(Some(left_pane_id), Some(right_pane_id));
     }
 }

@@ -1,4 +1,4 @@
-use crate::client::{ClientId, ClientInfo};
+use crate::client::{ClientId, ClientInfo, ClientViewId, ClientViewState, ClientWindowViewState};
 use crate::pane::{CachePolicy, Pane, PaneId};
 use crate::ssh_agent::AgentProxy;
 use crate::tab::{size_trace_enabled, NotifyMux, SplitRequest, Tab, TabId};
@@ -110,6 +110,7 @@ pub struct Mux {
     subscribers: RwLock<HashMap<usize, Box<dyn Fn(MuxNotification) -> bool + Send + Sync>>>,
     banner: RwLock<Option<String>>,
     clients: RwLock<HashMap<ClientId, ClientInfo>>,
+    client_views: RwLock<HashMap<ClientViewId, ClientViewState>>,
     identity: RwLock<Option<Arc<ClientId>>>,
     num_panes_by_workspace: RwLock<HashMap<String, usize>>,
     main_thread_id: std::thread::ThreadId,
@@ -368,6 +369,21 @@ lazy_static::lazy_static! {
     static ref MUX: Mutex<Option<Arc<Mux>>> = Mutex::new(None);
 }
 
+#[cfg(test)]
+lazy_static::lazy_static! {
+    pub(crate) static ref TEST_MUX_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+}
+
+#[cfg(test)]
+pub(crate) struct TestMuxGuard;
+
+#[cfg(test)]
+impl Drop for TestMuxGuard {
+    fn drop(&mut self) {
+        Mux::shutdown();
+    }
+}
+
 pub struct MuxWindowBuilder {
     window_id: WindowId,
     activity: Option<Activity>,
@@ -445,6 +461,7 @@ impl Mux {
             subscribers: RwLock::new(HashMap::new()),
             banner: RwLock::new(None),
             clients: RwLock::new(HashMap::new()),
+            client_views: RwLock::new(HashMap::new()),
             identity: RwLock::new(None),
             num_panes_by_workspace: RwLock::new(HashMap::new()),
             main_thread_id: std::thread::current().id(),
@@ -497,6 +514,136 @@ impl Mux {
         }
     }
 
+    pub fn active_view_id(&self) -> Option<Arc<ClientViewId>> {
+        let ident = self.identity.read().clone()?;
+        self.active_view_id_for_client(ident.as_ref())
+    }
+
+    pub fn active_view_id_for_client(&self, client_id: &ClientId) -> Option<Arc<ClientViewId>> {
+        self.clients
+            .read()
+            .get(client_id)
+            .map(|info| info.view_id.clone())
+    }
+
+    pub fn client_window_view_state_for_view(
+        &self,
+        view_id: &ClientViewId,
+    ) -> HashMap<WindowId, ClientWindowViewState> {
+        self.client_views
+            .read()
+            .get(view_id)
+            .map(|state| state.windows.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn client_window_view_state_for_current_identity(
+        &self,
+    ) -> HashMap<WindowId, ClientWindowViewState> {
+        self.active_view_id()
+            .map(|view_id| self.client_window_view_state_for_view(view_id.as_ref()))
+            .unwrap_or_default()
+    }
+
+    pub fn get_active_tab_id_for_window_for_client(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+    ) -> Option<TabId> {
+        self.client_views
+            .read()
+            .get(view_id)?
+            .windows
+            .get(&window_id)?
+            .active_tab_id
+    }
+
+    pub fn get_last_active_tab_id_for_window_for_client(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+    ) -> Option<TabId> {
+        self.client_views
+            .read()
+            .get(view_id)?
+            .windows
+            .get(&window_id)?
+            .last_active_tab_id
+    }
+
+    pub fn get_active_tab_for_window_for_client(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+    ) -> Option<Arc<Tab>> {
+        let tab_id = self.get_active_tab_id_for_window_for_client(view_id, window_id)?;
+        self.get_tab(tab_id)
+    }
+
+    pub fn get_active_tab_for_window_for_current_identity(
+        &self,
+        window_id: WindowId,
+    ) -> Option<Arc<Tab>> {
+        let view_id = self.active_view_id()?;
+        self.get_active_tab_for_window_for_client(view_id.as_ref(), window_id)
+    }
+
+    pub fn get_active_tab_idx_for_window_for_current_identity(
+        &self,
+        window_id: WindowId,
+    ) -> Option<usize> {
+        let tab_id = self
+            .get_active_tab_for_window_for_current_identity(window_id)?
+            .tab_id();
+        let window = self.get_window(window_id)?;
+        window.idx_by_id(tab_id)
+    }
+
+    pub fn get_last_active_tab_idx_for_window_for_current_identity(
+        &self,
+        window_id: WindowId,
+    ) -> Option<usize> {
+        let view_id = self.active_view_id()?;
+        let tab_id = self.get_last_active_tab_id_for_window_for_client(view_id.as_ref(), window_id)?;
+        let window = self.get_window(window_id)?;
+        window.idx_by_id(tab_id)
+    }
+
+    pub fn get_active_pane_id_for_tab_for_client(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+        tab_id: TabId,
+    ) -> Option<PaneId> {
+        self.client_views
+            .read()
+            .get(view_id)?
+            .windows
+            .get(&window_id)?
+            .tabs
+            .get(&tab_id)?
+            .active_pane_id
+    }
+
+    pub fn get_active_pane_for_tab_for_client(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+        tab_id: TabId,
+    ) -> Option<Arc<dyn Pane>> {
+        let pane_id = self.get_active_pane_id_for_tab_for_client(view_id, window_id, tab_id)?;
+        self.get_pane(pane_id)
+    }
+
+    pub fn get_active_pane_for_window_for_current_identity(
+        &self,
+        window_id: WindowId,
+    ) -> Option<Arc<dyn Pane>> {
+        let view_id = self.active_view_id()?;
+        let tab_id = self.get_active_tab_id_for_window_for_client(view_id.as_ref(), window_id)?;
+        self.get_active_pane_for_tab_for_client(view_id.as_ref(), window_id, tab_id)
+    }
+
     pub fn record_focus_for_current_identity(&self, pane_id: PaneId) {
         if let Some(ident) = self.identity.read().as_ref() {
             self.record_focus_for_client(ident, pane_id);
@@ -514,9 +661,17 @@ impl Mux {
 
     pub fn record_focus_for_client(&self, client_id: &ClientId, pane_id: PaneId) {
         let mut prior = None;
+        let mut view_id = None;
         if let Some(info) = self.clients.write().get_mut(client_id) {
             prior = info.focused_pane_id;
+            view_id = Some(info.view_id.clone());
             info.update_focused_pane(pane_id);
+        }
+
+        if let (Some(view_id), Some((_domain_id, window_id, tab_id))) =
+            (view_id, self.resolve_pane_id(pane_id))
+        {
+            let _ = self.set_active_pane_for_client_view(view_id.as_ref(), window_id, tab_id, pane_id);
         }
 
         if prior == Some(pane_id) {
@@ -544,16 +699,7 @@ impl Mux {
             .resolve_pane_id(pane_id)
             .ok_or_else(|| anyhow::anyhow!("can't find {pane_id} in the mux"))?;
 
-        // Focus/activate the containing tab within its window
-        {
-            let mut win = self
-                .get_window_mut(window_id)
-                .ok_or_else(|| anyhow::anyhow!("window_id {window_id} not found"))?;
-            let tab_idx = win
-                .idx_by_id(tab_id)
-                .ok_or_else(|| anyhow::anyhow!("tab {tab_id} not in {window_id}"))?;
-            win.save_and_then_set_active(tab_idx);
-        }
+        self.set_active_pane_for_current_identity(window_id, tab_id, pane_id)?;
 
         // Focus/activate the pane locally
         let tab = self
@@ -565,10 +711,196 @@ impl Mux {
         Ok(())
     }
 
-    pub fn register_client(&self, client_id: Arc<ClientId>) {
-        self.clients
-            .write()
-            .insert((*client_id).clone(), ClientInfo::new(client_id));
+    fn seed_view_state_for_tab(window_state: &mut ClientWindowViewState, tab: &Arc<Tab>) {
+        let tab_id = tab.tab_id();
+        window_state.tabs.entry(tab_id).or_default();
+        if window_state.active_tab_id.is_none() {
+            window_state.active_tab_id = Some(tab_id);
+        }
+        let tab_state = window_state.tabs.entry(tab_id).or_default();
+        if tab_state.active_pane_id.is_none() {
+            if let Some(pane) = tab.get_active_pane() {
+                tab_state.active_pane_id = Some(pane.pane_id());
+            }
+        }
+    }
+
+    fn default_workspace_for_new_client(&self) -> String {
+        let default_workspace = self.get_default_workspace();
+        if !self.is_workspace_empty(&default_workspace) {
+            return default_workspace;
+        }
+
+        self.iter_workspaces()
+            .into_iter()
+            .find(|workspace| !self.is_workspace_empty(workspace))
+            .unwrap_or(default_workspace)
+    }
+
+    fn build_bootstrap_view_state_for_workspace(
+        &self,
+        workspace: &str,
+    ) -> (ClientViewState, Option<PaneId>) {
+        let mut view_state = ClientViewState::default();
+        let mut focused_pane_id = None;
+
+        for window_id in self.iter_windows_in_workspace(workspace) {
+            let Some(window) = self.get_window(window_id) else {
+                continue;
+            };
+            let window_state = view_state.windows.entry(window_id).or_default();
+            for tab in window.iter() {
+                Self::seed_view_state_for_tab(window_state, &tab);
+            }
+            if focused_pane_id.is_none() {
+                focused_pane_id = window_state.active_pane_id();
+            }
+        }
+
+        (view_state, focused_pane_id)
+    }
+
+    fn preferred_focused_pane_for_view_in_workspace(
+        &self,
+        view_id: &ClientViewId,
+        workspace: &str,
+    ) -> Option<PaneId> {
+        let window_ids = self.iter_windows_in_workspace(workspace);
+        let client_views = self.client_views.read();
+        let view_state = client_views.get(view_id)?;
+        for window_id in window_ids {
+            if let Some(pane_id) = view_state
+                .windows
+                .get(&window_id)
+                .and_then(|window_state| window_state.active_pane_id())
+            {
+                if self.resolve_pane_id(pane_id).is_some() {
+                    return Some(pane_id);
+                }
+            }
+        }
+        None
+    }
+
+    fn merge_bootstrap_view_state(target: &mut ClientViewState, mut bootstrap: ClientViewState) {
+        for (window_id, mut bootstrap_window_state) in bootstrap.windows.drain() {
+            let window_state = target.windows.entry(window_id).or_default();
+            if window_state.active_tab_id.is_none() {
+                window_state.active_tab_id = bootstrap_window_state.active_tab_id.take();
+            }
+            if window_state.last_active_tab_id.is_none() {
+                window_state.last_active_tab_id = bootstrap_window_state.last_active_tab_id.take();
+            }
+            for (tab_id, bootstrap_tab_state) in bootstrap_window_state.tabs.drain() {
+                let tab_state = window_state.tabs.entry(tab_id).or_default();
+                if tab_state.active_pane_id.is_none() {
+                    tab_state.active_pane_id = bootstrap_tab_state.active_pane_id;
+                }
+            }
+        }
+    }
+
+    pub fn set_active_tab_for_client_view(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+        tab_id: TabId,
+    ) -> anyhow::Result<()> {
+        let tab = self
+            .get_tab(tab_id)
+            .ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        let window = self
+            .get_window(window_id)
+            .ok_or_else(|| anyhow!("window {window_id} not found"))?;
+        if window.idx_by_id(tab_id).is_none() {
+            anyhow::bail!("tab {tab_id} is not in window {window_id}");
+        }
+        drop(window);
+
+        let mut client_views = self.client_views.write();
+        let view_state = client_views.entry(view_id.clone()).or_default();
+        let window_state = view_state.windows.entry(window_id).or_default();
+        window_state.set_active_tab(tab_id);
+        Self::seed_view_state_for_tab(window_state, &tab);
+        drop(client_views);
+
+        self.notify(MuxNotification::WindowInvalidated(window_id));
+        Ok(())
+    }
+
+    pub fn set_active_tab_for_current_identity(
+        &self,
+        window_id: WindowId,
+        tab_id: TabId,
+    ) -> anyhow::Result<()> {
+        let view_id = self
+            .active_view_id()
+            .ok_or_else(|| anyhow!("no current client identity"))?;
+        self.set_active_tab_for_client_view(view_id.as_ref(), window_id, tab_id)
+    }
+
+    pub fn set_active_pane_for_client_view(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+        tab_id: TabId,
+        pane_id: PaneId,
+    ) -> anyhow::Result<()> {
+        let (_domain_id, pane_window_id, pane_tab_id) = self
+            .resolve_pane_id(pane_id)
+            .ok_or_else(|| anyhow!("pane {pane_id} not found"))?;
+        if pane_window_id != window_id || pane_tab_id != tab_id {
+            anyhow::bail!(
+                "pane {pane_id} is in window/tab {pane_window_id}/{pane_tab_id}, not {window_id}/{tab_id}"
+            );
+        }
+
+        let tab = self
+            .get_tab(tab_id)
+            .ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        let mut client_views = self.client_views.write();
+        let view_state = client_views.entry(view_id.clone()).or_default();
+        let window_state = view_state.windows.entry(window_id).or_default();
+        window_state.set_active_pane(tab_id, pane_id);
+        Self::seed_view_state_for_tab(window_state, &tab);
+        drop(client_views);
+
+        self.notify(MuxNotification::WindowInvalidated(window_id));
+        Ok(())
+    }
+
+    pub fn set_active_pane_for_current_identity(
+        &self,
+        window_id: WindowId,
+        tab_id: TabId,
+        pane_id: PaneId,
+    ) -> anyhow::Result<()> {
+        let view_id = self
+            .active_view_id()
+            .ok_or_else(|| anyhow!("no current client identity"))?;
+        self.set_active_pane_for_client_view(view_id.as_ref(), window_id, tab_id, pane_id)
+    }
+
+    pub fn register_client(&self, client_id: Arc<ClientId>, view_id: Arc<ClientViewId>) {
+        let workspace = self.default_workspace_for_new_client();
+        let (bootstrap_view_state, bootstrap_focused_pane_id) =
+            self.build_bootstrap_view_state_for_workspace(&workspace);
+
+        {
+            let mut client_views = self.client_views.write();
+            let view_state = client_views.entry((*view_id).clone()).or_default();
+            Self::merge_bootstrap_view_state(view_state, bootstrap_view_state);
+        }
+
+        let focused_pane_id = self
+            .preferred_focused_pane_for_view_in_workspace(view_id.as_ref(), &workspace)
+            .or(bootstrap_focused_pane_id);
+
+        let client_key = (*client_id).clone();
+        let mut info = ClientInfo::new(client_id, view_id);
+        info.active_workspace.replace(workspace);
+        info.focused_pane_id = focused_pane_id;
+        self.clients.write().insert(client_key, info);
     }
 
     pub fn iter_clients(&self) -> Vec<ClientInfo> {
@@ -813,11 +1145,29 @@ impl Mux {
     fn remove_pane_internal(&self, pane_id: PaneId) {
         log::debug!("removing pane {}", pane_id);
         let mut changed = false;
+        let pane_location = self.resolve_pane_id(pane_id);
         if let Some(pane) = self.panes.write().remove(&pane_id).clone() {
             log::debug!("killing pane {}", pane_id);
             pane.kill();
             self.notify(MuxNotification::PaneRemoved(pane_id));
             changed = true;
+        }
+
+        if let Some((_domain_id, window_id, tab_id)) = pane_location {
+            let replacement_pane_id = self
+                .get_tab(tab_id)
+                .and_then(|tab| tab.get_active_pane())
+                .map(|pane| pane.pane_id());
+            let mut client_views = self.client_views.write();
+            for view_state in client_views.values_mut() {
+                if let Some(window_state) = view_state.windows.get_mut(&window_id) {
+                    if let Some(tab_state) = window_state.tabs.get_mut(&tab_id) {
+                        if tab_state.active_pane_id == Some(pane_id) {
+                            tab_state.active_pane_id = replacement_pane_id;
+                        }
+                    }
+                }
+            }
         }
 
         if changed {
@@ -830,10 +1180,26 @@ impl Mux {
 
         let tab = self.tabs.write().remove(&tab_id)?;
 
+        let mut removed_from_windows = vec![];
         if let Some(mut windows) = self.windows.try_write() {
             for w in windows.values_mut() {
-                w.remove_by_id(tab_id);
+                if let Some(idx) = w.idx_by_id(tab_id) {
+                    w.remove_by_id(tab_id);
+                    removed_from_windows.push((
+                        w.window_id(),
+                        idx,
+                        w.iter().map(|tab| tab.tab_id()).collect::<Vec<_>>(),
+                    ));
+                }
             }
+        }
+        for (window_id, removed_idx, remaining_tab_ids) in removed_from_windows {
+            self.repair_client_view_state_after_tab_removed(
+                window_id,
+                tab_id,
+                removed_idx,
+                &remaining_tab_ids,
+            );
         }
 
         let mut pane_ids = vec![];
@@ -854,6 +1220,9 @@ impl Mux {
 
         let window = self.windows.write().remove(&window_id);
         if let Some(window) = window {
+            for view_state in self.client_views.write().values_mut() {
+                view_state.windows.remove(&window_id);
+            }
             // Gather all the domains referenced by this window
             let mut domains_of_window = HashSet::new();
             for tab in window.iter() {
@@ -973,11 +1342,6 @@ impl Mux {
         }))
     }
 
-    pub fn get_active_tab_for_window(&self, window_id: WindowId) -> Option<Arc<Tab>> {
-        let window = self.get_window(window_id)?;
-        window.get_active().map(Arc::clone)
-    }
-
     pub fn new_empty_window(
         &self,
         workspace: Option<String>,
@@ -1001,9 +1365,72 @@ impl Mux {
                 .ok_or_else(|| anyhow!("add_tab_to_window: no such window_id {}", window_id))?;
             window.push(tab);
         }
+        if let Some(view_id) = self.active_view_id() {
+            let mut client_views = self.client_views.write();
+            let view_state = client_views.entry((*view_id).clone()).or_default();
+            let window_state = view_state.windows.entry(window_id).or_default();
+            Self::seed_view_state_for_tab(window_state, tab);
+        }
         self.recompute_pane_count();
         self.notify(MuxNotification::TabAddedToWindow { tab_id, window_id });
         Ok(())
+    }
+
+    fn repair_client_view_state_after_tab_removed(
+        &self,
+        window_id: WindowId,
+        removed_tab_id: TabId,
+        removed_tab_idx: usize,
+        remaining_tab_ids: &[TabId],
+    ) {
+        let replacement_idx = removed_tab_idx.min(remaining_tab_ids.len().saturating_sub(1));
+        let replacement_tab_id = remaining_tab_ids.get(replacement_idx).copied();
+        let replacement_from_last = |state: &ClientWindowViewState| {
+            state
+                .last_active_tab_id
+                .filter(|tab_id| remaining_tab_ids.contains(tab_id))
+        };
+
+        let mut client_views = self.client_views.write();
+        for view_state in client_views.values_mut() {
+            let mut remove_window_state = false;
+            if let Some(window_state) = view_state.windows.get_mut(&window_id) {
+                let removed_was_active = window_state.active_tab_id == Some(removed_tab_id);
+                window_state.clear_removed_tab(removed_tab_id);
+
+                if remaining_tab_ids.is_empty() {
+                    remove_window_state = true;
+                } else if removed_was_active {
+                    let replacement = replacement_from_last(window_state).or(replacement_tab_id);
+                    if let Some(tab_id) = replacement {
+                        window_state.set_active_tab(tab_id);
+                    }
+                } else if let Some(active_tab_id) = window_state.active_tab_id {
+                    if !remaining_tab_ids.contains(&active_tab_id) {
+                        if let Some(tab_id) =
+                            replacement_from_last(window_state).or(replacement_tab_id)
+                        {
+                            window_state.set_active_tab(tab_id);
+                        }
+                    }
+                }
+            }
+            if remove_window_state {
+                view_state.windows.remove(&window_id);
+            }
+        }
+        drop(client_views);
+
+        if let Some(tab_id) = replacement_tab_id {
+            if let Some(tab) = self.get_tab(tab_id) {
+                let mut client_views = self.client_views.write();
+                for view_state in client_views.values_mut() {
+                    if let Some(window_state) = view_state.windows.get_mut(&window_id) {
+                        Self::seed_view_state_for_tab(window_state, &tab);
+                    }
+                }
+            }
+        }
     }
 
     pub fn window_containing_tab(&self, tab_id: TabId) -> Option<WindowId> {
@@ -1322,12 +1749,12 @@ impl Mux {
 
         let window_builder;
         let (window_id, size) = if let Some(window_id) = window_id {
-            let window = self
-                .get_window_mut(window_id)
+            let _window = self
+                .get_window(window_id)
                 .ok_or_else(|| anyhow!("window_id {} not found on this server", window_id))?;
-            let tab = window
-                .get_active()
-                .ok_or_else(|| anyhow!("window {} has no tabs", window_id))?;
+            let tab = self
+                .get_active_tab_for_window_for_current_identity(window_id)
+                .ok_or_else(|| anyhow!("window {} has no active tab for this client", window_id))?;
             let size = tab.get_size();
 
             (window_id, size)
@@ -1367,14 +1794,17 @@ impl Mux {
         let trace_enabled = size_trace_enabled();
         if trace_enabled {
             let existing = if let Some(id) = window_id {
-                if let Some(window) = self.get_window(id) {
-                    window
-                        .get_active()
-                        .map(|tab| tab.debug_size_snapshot())
-                        .unwrap_or_else(|| "none".to_string())
-                } else {
-                    "none".to_string()
-                }
+                current_pane_id
+                    .and_then(|pane_id| {
+                        let (_, pane_window_id, tab_id) = self.resolve_pane_id(pane_id)?;
+                        if pane_window_id != id {
+                            return None;
+                        }
+                        Some(tab_id)
+                    })
+                    .and_then(|tab_id| self.get_tab(tab_id))
+                    .map(|tab| tab.debug_size_snapshot())
+                    .unwrap_or_else(|| "none".to_string())
             } else {
                 "none".to_string()
             };
@@ -1397,15 +1827,28 @@ impl Mux {
         let term_config;
 
         let (window_id, size) = if let Some(window_id) = window_id {
-            let window = self
-                .get_window_mut(window_id)
+            let _window = self
+                .get_window(window_id)
                 .ok_or_else(|| anyhow!("window_id {} not found on this server", window_id))?;
-            let tab = window
-                .get_active()
-                .ok_or_else(|| anyhow!("window {} has no tabs", window_id))?;
-            let pane = tab
-                .get_active_pane()
-                .ok_or_else(|| anyhow!("active tab in window {} has no panes", window_id))?;
+            let pane_id = current_pane_id.ok_or_else(|| {
+                anyhow!("existing-window spawn for window {} requires current_pane_id", window_id)
+            })?;
+            let (_, pane_window_id, tab_id) = self
+                .resolve_pane_id(pane_id)
+                .ok_or_else(|| anyhow!("current_pane_id {} is invalid", pane_id))?;
+            anyhow::ensure!(
+                pane_window_id == window_id,
+                "current_pane_id {} is in window {}, not requested window {}",
+                pane_id,
+                pane_window_id,
+                window_id
+            );
+            let tab = self
+                .get_tab(tab_id)
+                .ok_or_else(|| anyhow!("tab {} not found for pane {}", tab_id, pane_id))?;
+            let pane = self
+                .get_pane(pane_id)
+                .ok_or_else(|| anyhow!("pane {} not found", pane_id))?;
             term_config = pane.get_config();
 
             // Trust the caller's size for existing-window spawns so the new
@@ -1467,12 +1910,8 @@ impl Mux {
 
         // FIXME: clipboard?
 
-        let mut window = self
-            .get_window_mut(window_id)
-            .ok_or_else(|| anyhow!("no such window!?"))?;
-        if let Some(idx) = window.idx_by_id(tab.tab_id()) {
-            window.save_and_then_set_active(idx);
-        }
+        self.set_active_tab_for_current_identity(window_id, tab.tab_id())
+            .ok();
 
         if trace_enabled {
             log::warn!(
@@ -1758,21 +2197,203 @@ mod test {
         }
     }
 
-    struct MuxGuard;
-
-    impl Drop for MuxGuard {
-        fn drop(&mut self) {
-            Mux::shutdown();
-        }
+    fn register_test_client(
+        mux: &Arc<Mux>,
+        view_name: &str,
+    ) -> (Arc<ClientId>, Arc<ClientViewId>) {
+        let client_id = Arc::new(ClientId::new());
+        let view_id = Arc::new(ClientViewId(view_name.to_string()));
+        mux.register_client(client_id.clone(), view_id.clone());
+        (client_id, view_id)
     }
 
     #[test]
-    fn spawn_tab_in_existing_window_uses_provided_size() {
+    fn register_client_bootstraps_existing_session_view_state() {
+        let _test_lock = TEST_MUX_LOCK.lock();
         let _executor = promise::spawn::SimpleExecutor::new();
         let domain = Arc::new(FakeDomain::new());
         let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
         Mux::set_mux(&mux);
-        let _guard = MuxGuard;
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 40,
+            cols: 120,
+            pixel_width: 1200,
+            pixel_height: 800,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+
+        let tab_a = Arc::new(Tab::new(&size));
+        let pane_a = FakePane::new(10, size, domain.id);
+        tab_a.assign_pane(&pane_a);
+        mux.add_tab_and_active_pane(&tab_a).unwrap();
+        mux.add_tab_to_window(&tab_a, window_id).unwrap();
+
+        let tab_b = Arc::new(Tab::new(&size));
+        let pane_b = FakePane::new(11, size, domain.id);
+        tab_b.assign_pane(&pane_b);
+        mux.add_tab_and_active_pane(&tab_b).unwrap();
+        mux.add_tab_to_window(&tab_b, window_id).unwrap();
+
+        let (client_id, view_id) = register_test_client(&mux, "bootstrap-view");
+
+        assert_eq!(
+            mux.active_workspace_for_client(&client_id),
+            DEFAULT_WORKSPACE.to_string()
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_id.as_ref(), window_id)
+                .map(|tab| tab.tab_id()),
+            Some(tab_a.tab_id())
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(view_id.as_ref(), window_id, tab_a.tab_id()),
+            Some(pane_a.pane_id())
+        );
+        assert_eq!(
+            mux.iter_clients()
+                .into_iter()
+                .find(|info| info.client_id.as_ref() == client_id.as_ref())
+                .and_then(|info| info.focused_pane_id),
+            Some(pane_a.pane_id())
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(view_id.as_ref(), window_id, tab_b.tab_id()),
+            Some(pane_b.pane_id())
+        );
+    }
+
+    #[test]
+    fn register_client_uses_first_non_empty_workspace_when_default_is_empty() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some("alt".to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new(20, size, domain.id);
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let (client_id, view_id) = register_test_client(&mux, "non-empty-workspace");
+
+        assert_eq!(mux.active_workspace_for_client(&client_id), "alt".to_string());
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_id.as_ref(), window_id)
+                .map(|tab| tab.tab_id()),
+            Some(tab.tab_id())
+        );
+        assert_eq!(
+            mux.iter_clients()
+                .into_iter()
+                .find(|info| info.client_id.as_ref() == client_id.as_ref())
+                .and_then(|info| info.focused_pane_id),
+            Some(pane.pane_id())
+        );
+    }
+
+    #[test]
+    fn reconnecting_persistent_view_preserves_existing_choices_and_bootstraps_new_windows() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 1000,
+            pixel_height: 600,
+            dpi: 96,
+        };
+
+        let window_a = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab_a = Arc::new(Tab::new(&size));
+        let pane_a = FakePane::new(30, size, domain.id);
+        tab_a.assign_pane(&pane_a);
+        mux.add_tab_and_active_pane(&tab_a).unwrap();
+        mux.add_tab_to_window(&tab_a, window_a).unwrap();
+
+        let tab_b = Arc::new(Tab::new(&size));
+        let pane_b = FakePane::new(31, size, domain.id);
+        tab_b.assign_pane(&pane_b);
+        mux.add_tab_and_active_pane(&tab_b).unwrap();
+        mux.add_tab_to_window(&tab_b, window_a).unwrap();
+
+        let client_a = Arc::new(ClientId::new());
+        let view_id = Arc::new(ClientViewId("persistent-view".to_string()));
+        mux.register_client(client_a.clone(), view_id.clone());
+        mux.set_active_tab_for_client_view(view_id.as_ref(), window_a, tab_b.tab_id())
+            .unwrap();
+        mux.set_active_pane_for_client_view(view_id.as_ref(), window_a, tab_b.tab_id(), pane_b.pane_id())
+            .unwrap();
+        mux.record_focus_for_client(client_a.as_ref(), pane_b.pane_id());
+        mux.unregister_client(client_a.as_ref());
+
+        let window_b = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab_c = Arc::new(Tab::new(&size));
+        let pane_c = FakePane::new(32, size, domain.id);
+        tab_c.assign_pane(&pane_c);
+        mux.add_tab_and_active_pane(&tab_c).unwrap();
+        mux.add_tab_to_window(&tab_c, window_b).unwrap();
+
+        let client_b = Arc::new(ClientId::new());
+        mux.register_client(client_b.clone(), view_id.clone());
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_id.as_ref(), window_a)
+                .map(|tab| tab.tab_id()),
+            Some(tab_b.tab_id())
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(view_id.as_ref(), window_a, tab_b.tab_id()),
+            Some(pane_b.pane_id())
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_id.as_ref(), window_b)
+                .map(|tab| tab.tab_id()),
+            Some(tab_c.tab_id())
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(view_id.as_ref(), window_b, tab_c.tab_id()),
+            Some(pane_c.pane_id())
+        );
+        assert_eq!(
+            mux.iter_clients()
+                .into_iter()
+                .find(|info| info.client_id.as_ref() == client_b.as_ref())
+                .and_then(|info| info.focused_pane_id),
+            Some(pane_b.pane_id())
+        );
+    }
+
+    #[test]
+    fn spawn_tab_in_existing_window_uses_provided_size() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+        let (client_id, _view_id) = register_test_client(&mux, "spawn-test");
+        let _identity = mux.with_identity(Some(client_id));
 
         smol::block_on(async move {
             let window_builder = mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
@@ -1805,7 +2426,7 @@ mod test {
                     None,
                     None,
                     desired,
-                    None,
+                    Some(1),
                     DEFAULT_WORKSPACE.to_string(),
                     None,
                 )
@@ -1817,5 +2438,228 @@ mod test {
             assert_eq!(stale_tab.get_size(), desired);
             assert_eq!(spawned_tab.get_size(), desired);
         });
+    }
+
+    #[test]
+    fn spawn_tab_in_existing_window_uses_explicit_current_pane_without_client_view() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        smol::block_on(async move {
+            let window_builder = mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+            let window_id = *window_builder;
+
+            let stale = TerminalSize {
+                rows: 1,
+                cols: 1,
+                pixel_width: 8,
+                pixel_height: 16,
+                dpi: 96,
+            };
+            let stale_tab = Arc::new(Tab::new(&stale));
+            let source_pane = FakePane::new(1, stale, domain.id);
+            stale_tab.assign_pane(&source_pane);
+            mux.add_tab_and_active_pane(&stale_tab).unwrap();
+            mux.add_tab_to_window(&stale_tab, window_id).unwrap();
+
+            let desired = TerminalSize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 1200,
+                pixel_height: 800,
+                dpi: 96,
+            };
+
+            let (spawned_tab, _pane, spawned_window_id) = mux
+                .spawn_tab_or_window(
+                    Some(window_id),
+                    config::keyassignment::SpawnTabDomain::DefaultDomain,
+                    None,
+                    None,
+                    desired,
+                    Some(1),
+                    DEFAULT_WORKSPACE.to_string(),
+                    None,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(spawned_window_id, window_id);
+            assert_eq!(*domain.last_spawn_size.lock(), Some(desired));
+            assert_eq!(stale_tab.get_size(), desired);
+            assert_eq!(spawned_tab.get_size(), desired);
+        });
+    }
+
+    #[test]
+    fn spawn_tab_in_existing_window_requires_explicit_current_pane() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        smol::block_on(async move {
+            let window_builder = mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+            let window_id = *window_builder;
+
+            let stale = TerminalSize {
+                rows: 1,
+                cols: 1,
+                pixel_width: 8,
+                pixel_height: 16,
+                dpi: 96,
+            };
+            let stale_tab = Arc::new(Tab::new(&stale));
+            stale_tab.assign_pane(&FakePane::new(1, stale, domain.id));
+            mux.add_tab_and_active_pane(&stale_tab).unwrap();
+            mux.add_tab_to_window(&stale_tab, window_id).unwrap();
+
+            let err = match mux
+                .spawn_tab_or_window(
+                    Some(window_id),
+                    config::keyassignment::SpawnTabDomain::DefaultDomain,
+                    None,
+                    None,
+                    stale,
+                    None,
+                    DEFAULT_WORKSPACE.to_string(),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => panic!("spawn_tab_or_window should require current_pane_id"),
+                Err(err) => err,
+            };
+
+            assert!(
+                err.to_string()
+                    .contains("requires current_pane_id")
+            );
+        });
+    }
+
+    #[test]
+    fn client_views_keep_independent_active_tabs_in_same_window() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let (client_a, view_a) = register_test_client(&mux, "view-a");
+        let (_client_b, view_b) = register_test_client(&mux, "view-b");
+
+        let size = TerminalSize {
+            rows: 40,
+            cols: 120,
+            pixel_width: 1200,
+            pixel_height: 800,
+            dpi: 96,
+        };
+
+        let _identity = mux.with_identity(Some(client_a));
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+
+        let tab_a = Arc::new(Tab::new(&size));
+        tab_a.assign_pane(&FakePane::new(10, size, domain.id));
+        mux.add_tab_and_active_pane(&tab_a).unwrap();
+        mux.add_tab_to_window(&tab_a, window_id).unwrap();
+
+        let tab_b = Arc::new(Tab::new(&size));
+        tab_b.assign_pane(&FakePane::new(11, size, domain.id));
+        mux.add_tab_and_active_pane(&tab_b).unwrap();
+        mux.add_tab_to_window(&tab_b, window_id).unwrap();
+
+        mux.set_active_tab_for_client_view(view_b.as_ref(), window_id, tab_b.tab_id())
+            .unwrap();
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_a.as_ref(), window_id)
+                .map(|tab| tab.tab_id()),
+            Some(tab_a.tab_id())
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_b.as_ref(), window_id)
+                .map(|tab| tab.tab_id()),
+            Some(tab_b.tab_id())
+        );
+
+        mux.set_active_tab_for_client_view(view_a.as_ref(), window_id, tab_b.tab_id())
+            .unwrap();
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_a.as_ref(), window_id)
+                .map(|tab| tab.tab_id()),
+            Some(tab_b.tab_id())
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_b.as_ref(), window_id)
+                .map(|tab| tab.tab_id()),
+            Some(tab_b.tab_id())
+        );
+    }
+
+    #[test]
+    fn removing_active_tab_reassigns_only_affected_view() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let (client_a, view_a) = register_test_client(&mux, "view-a");
+        let (_client_b, view_b) = register_test_client(&mux, "view-b");
+
+        let size = TerminalSize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 1000,
+            pixel_height: 600,
+            dpi: 96,
+        };
+
+        let _identity = mux.with_identity(Some(client_a));
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+
+        let tab_a = Arc::new(Tab::new(&size));
+        tab_a.assign_pane(&FakePane::new(20, size, domain.id));
+        mux.add_tab_and_active_pane(&tab_a).unwrap();
+        mux.add_tab_to_window(&tab_a, window_id).unwrap();
+
+        let tab_b = Arc::new(Tab::new(&size));
+        tab_b.assign_pane(&FakePane::new(21, size, domain.id));
+        mux.add_tab_and_active_pane(&tab_b).unwrap();
+        mux.add_tab_to_window(&tab_b, window_id).unwrap();
+
+        let tab_c = Arc::new(Tab::new(&size));
+        tab_c.assign_pane(&FakePane::new(22, size, domain.id));
+        mux.add_tab_and_active_pane(&tab_c).unwrap();
+        mux.add_tab_to_window(&tab_c, window_id).unwrap();
+
+        mux.set_active_tab_for_client_view(view_a.as_ref(), window_id, tab_b.tab_id())
+            .unwrap();
+        mux.set_active_tab_for_client_view(view_b.as_ref(), window_id, tab_c.tab_id())
+            .unwrap();
+
+        mux.remove_tab(tab_b.tab_id());
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_a.as_ref(), window_id)
+                .map(|tab| tab.tab_id()),
+            Some(tab_a.tab_id())
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_b.as_ref(), window_id)
+                .map(|tab| tab.tab_id()),
+            Some(tab_c.tab_id())
+        );
     }
 }

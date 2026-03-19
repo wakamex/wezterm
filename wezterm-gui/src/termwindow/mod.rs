@@ -488,7 +488,7 @@ impl TermWindow {
                 front_end().forget_known_window(window);
             }
             WindowCloseConfirmation::AlwaysPrompt => {
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_active_mux_tab() {
                     Some(tab) => tab,
                     None => {
                         mux.kill_window(self.mux_window_id);
@@ -588,7 +588,7 @@ impl TermWindow {
         let fontconfig = Rc::new(FontConfiguration::new(Some(config.clone()), dpi)?);
 
         let mux = Mux::get();
-        let size = match mux.get_active_tab_for_window(mux_window_id) {
+        let size = match mux.get_active_tab_for_window_for_current_identity(mux_window_id) {
             Some(tab) => tab.get_size(),
             None => {
                 log::debug!("new_window has no tabs... yet?");
@@ -1415,8 +1415,7 @@ impl TermWindow {
     }
 
     fn is_pane_visible(&mut self, pane_id: PaneId) -> bool {
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return false,
         };
@@ -2181,8 +2180,8 @@ impl TermWindow {
 
     fn activate_tab(&mut self, tab_idx: isize) -> anyhow::Result<()> {
         let mux = Mux::get();
-        let mut window = mux
-            .get_window_mut(self.mux_window_id)
+        let window = mux
+            .get_window(self.mux_window_id)
             .ok_or_else(|| anyhow!("no such window"))?;
 
         // This logic is coupled with the CliSubCommand::ActivateTab
@@ -2196,9 +2195,12 @@ impl TermWindow {
         };
 
         if tab_idx < max {
-            window.save_and_then_set_active(tab_idx);
-
+            let tab_id = window
+                .get_by_idx(tab_idx)
+                .map(|tab| tab.tab_id())
+                .ok_or_else(|| anyhow!("no such tab index {tab_idx}"))?;
             drop(window);
+            mux.set_active_tab_for_current_identity(self.mux_window_id, tab_id)?;
 
             if let Some(tab) = self.get_active_pane_or_overlay() {
                 tab.focus_changed(true);
@@ -2221,7 +2223,10 @@ impl TermWindow {
 
         // This logic is coupled with the CliSubCommand::ActivateTab
         // logic in wezterm/src/main.rs. If you update this, update that!
-        let active = window.get_active_idx() as isize;
+        let active = self
+            .get_active_tab_index()
+            .ok_or_else(|| anyhow!("window has no active tab for this client"))?
+            as isize;
         let tab = active + delta;
         let tab = if wrap {
             let tab = if tab < 0 { max as isize + tab } else { tab };
@@ -2240,14 +2245,7 @@ impl TermWindow {
     }
 
     fn activate_last_tab(&mut self) -> anyhow::Result<()> {
-        let mux = Mux::get();
-        let window = mux
-            .get_window(self.mux_window_id)
-            .ok_or_else(|| anyhow!("no such window"))?;
-
-        let last_idx = window.get_last_active_idx();
-        drop(window);
-        match last_idx {
+        match self.get_last_active_tab_index() {
             Some(idx) => self.activate_tab(idx as isize),
             None => Ok(()),
         }
@@ -2262,15 +2260,18 @@ impl TermWindow {
         let max = window.len();
         ensure!(max > 0, "no more tabs");
 
-        let active = window.get_active_idx();
+        let active = self
+            .get_active_tab_index()
+            .ok_or_else(|| anyhow!("window has no active tab for this client"))?;
 
         ensure!(tab_idx < max, "cannot move a tab out of range");
 
         let tab_inst = window.remove_by_idx(active);
+        let moved_tab_id = tab_inst.tab_id();
         window.insert(tab_idx, &tab_inst);
-        window.set_active_without_saving(tab_idx);
 
         drop(window);
+        mux.set_active_tab_for_current_identity(self.mux_window_id, moved_tab_id)?;
         self.update_title();
         self.update_scrollbar();
 
@@ -2278,8 +2279,7 @@ impl TermWindow {
     }
 
     fn show_input_selector(&mut self, args: &config::keyassignment::InputSelector) {
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return,
         };
@@ -2304,8 +2304,7 @@ impl TermWindow {
     }
 
     fn show_prompt_input_line(&mut self, args: &PromptInputLine) {
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return,
         };
@@ -2328,8 +2327,7 @@ impl TermWindow {
     }
 
     fn show_confirmation(&mut self, args: &Confirmation) {
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return,
         };
@@ -2352,8 +2350,7 @@ impl TermWindow {
     }
 
     fn show_debug_overlay(&mut self) {
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return,
         };
@@ -2371,9 +2368,8 @@ impl TermWindow {
     }
 
     fn show_tab_navigator(&mut self) {
-        let mux = Mux::get();
-        let active_tab_idx = match mux.get_window(self.mux_window_id) {
-            Some(mux_window) => mux_window.get_active_idx(),
+        let active_tab_idx = match self.get_active_tab_index() {
+            Some(active_tab_idx) => active_tab_idx,
             None => return,
         };
         let title = "Tab Navigator".to_string();
@@ -2407,8 +2403,7 @@ impl TermWindow {
         let mux_window_id = self.mux_window_id;
         let window = self.window.as_ref().unwrap().clone();
 
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return,
         };
@@ -2418,8 +2413,8 @@ impl TermWindow {
             None => return,
         };
 
-        let domain_id_of_current_pane = tab
-            .get_active_pane()
+        let domain_id_of_current_pane = self
+            .get_active_pane_no_overlay()
             .expect("tab has no panes!")
             .domain_id();
         let pane_id = pane.pane_id();
@@ -2569,7 +2564,9 @@ impl TermWindow {
         let max = window.len();
         ensure!(max > 0, "no more tabs");
 
-        let active = window.get_active_idx();
+        let active = self
+            .get_active_tab_index()
+            .ok_or_else(|| anyhow!("window has no active tab for this client"))?;
         let tab = active as isize + delta;
         let tab = if tab < 0 {
             0usize
@@ -2797,7 +2794,6 @@ impl TermWindow {
                 con.hide_application();
             }
             QuitApplication => {
-                let mux = Mux::get();
                 let config = &self.config;
                 log::info!("QuitApplication over here (window)");
 
@@ -2807,7 +2803,7 @@ impl TermWindow {
                         con.terminate_message_loop();
                     }
                     WindowCloseConfirmation::AlwaysPrompt => {
-                        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                        let tab = match self.get_active_mux_tab() {
                             Some(tab) => tab,
                             None => anyhow::bail!("no active tab!?"),
                         };
@@ -2948,8 +2944,7 @@ impl TermWindow {
                 }
             }
             AdjustPaneSize(direction, amount) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_active_mux_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -2961,8 +2956,7 @@ impl TermWindow {
                 }
             }
             ActivatePaneByIndex(index) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_active_mux_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -2977,8 +2971,7 @@ impl TermWindow {
                 }
             }
             ActivatePaneDirection(direction) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_active_mux_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -2990,16 +2983,14 @@ impl TermWindow {
                 }
             }
             TogglePaneZoomState => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_active_mux_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
                 tab.toggle_zoom();
             }
             SetPaneZoomState(zoomed) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_active_mux_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -3101,8 +3092,7 @@ impl TermWindow {
                 // NOP here; handled by the overlay directly
             }
             RotatePanes(direction) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_active_mux_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -3215,11 +3205,7 @@ impl TermWindow {
     fn close_current_pane(&mut self, confirm: bool) {
         let mux_window_id = self.mux_window_id;
         let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(mux_window_id) {
-            Some(tab) => tab,
-            None => return,
-        };
-        let pane = match tab.get_active_pane() {
+        let pane = match self.get_active_pane_no_overlay() {
             Some(p) => p,
             None => return,
         };
@@ -3270,7 +3256,7 @@ impl TermWindow {
 
     fn close_current_tab(&mut self, confirm: bool) {
         let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return,
         };
@@ -3383,10 +3369,24 @@ impl TermWindow {
         self.pane_state(pane.pane_id()).viewport = None;
     }
 
+    fn get_active_mux_tab(&self) -> Option<Arc<Tab>> {
+        let mux = Mux::get();
+        mux.get_active_tab_for_window_for_current_identity(self.mux_window_id)
+    }
+
+    fn get_active_tab_index(&self) -> Option<usize> {
+        let mux = Mux::get();
+        mux.get_active_tab_idx_for_window_for_current_identity(self.mux_window_id)
+    }
+
+    fn get_last_active_tab_index(&self) -> Option<usize> {
+        let mux = Mux::get();
+        mux.get_last_active_tab_idx_for_window_for_current_identity(self.mux_window_id)
+    }
+
     fn get_active_pane_no_overlay(&self) -> Option<Arc<dyn Pane>> {
         let mux = Mux::get();
-        mux.get_active_tab_for_window(self.mux_window_id)
-            .and_then(|tab| tab.get_active_pane())
+        mux.get_active_pane_for_window_for_current_identity(self.mux_window_id)
     }
 
     /// Returns a Pane that we can interact with; this will typically be
@@ -3396,8 +3396,7 @@ impl TermWindow {
     /// an active overlay (such as search or copy mode) then that will
     /// be returned.
     pub fn get_active_pane_or_overlay(&self) -> Option<Arc<dyn Pane>> {
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return None,
         };
@@ -3412,7 +3411,7 @@ impl TermWindow {
         {
             Some(tab_overlay)
         } else {
-            let pane = tab.get_active_pane()?;
+            let pane = self.get_active_pane_no_overlay()?;
             let pane_id = pane.pane_id();
             self.pane_state(pane_id)
                 .overlay
@@ -3423,8 +3422,7 @@ impl TermWindow {
     }
 
     fn get_splits(&mut self) -> Vec<PositionedSplit> {
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return vec![],
         };
@@ -3463,7 +3461,8 @@ impl TermWindow {
             Some(window) => window,
             _ => return vec![],
         };
-        let tab_index = window.get_active_idx();
+        let tab_index = self.get_active_tab_index();
+        let last_active_idx = self.get_last_active_tab_index();
 
         window
             .iter()
@@ -3474,11 +3473,8 @@ impl TermWindow {
                 TabInformation {
                     tab_index: idx,
                     tab_id: tab.tab_id(),
-                    is_active: tab_index == idx,
-                    is_last_active: window
-                        .get_last_active_idx()
-                        .map(|last_active| last_active == idx)
-                        .unwrap_or(false),
+                    is_active: tab_index == Some(idx),
+                    is_last_active: last_active_idx == Some(idx),
                     window_id: self.mux_window_id,
                     tab_title: tab.get_title(),
                     active_pane: panes
@@ -3531,8 +3527,7 @@ impl TermWindow {
     }
 
     fn get_panes_to_render(&self) -> Vec<PositionedPane> {
-        let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+        let tab = match self.get_active_mux_tab() {
             Some(tab) => tab,
             None => return vec![],
         };
