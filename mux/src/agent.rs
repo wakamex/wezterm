@@ -75,6 +75,10 @@ pub struct AgentRuntimeSnapshot {
     pub observed_at: DateTime<Utc>,
     pub session_path: Option<String>,
     pub progress_summary: Option<String>,
+    #[serde(default)]
+    pub harness_mode: Option<String>,
+    #[serde(default)]
+    pub turn_phase: Option<String>,
     pub terminal_progress: Progress,
     pub observer_error: Option<String>,
     #[serde(skip, default)]
@@ -100,6 +104,8 @@ impl AgentRuntimeSnapshot {
             observed_at: now,
             session_path: None,
             progress_summary: None,
+            harness_mode: None,
+            turn_phase: None,
             terminal_progress: Progress::None,
             observer_error: None,
             observer_started_at: None,
@@ -135,6 +141,8 @@ pub fn prime_runtime_for_new_agent(
     runtime.observer_started_at = Some(Utc::now());
     runtime.session_path = None;
     runtime.progress_summary = None;
+    runtime.harness_mode = None;
+    runtime.turn_phase = None;
     runtime.turn_state = AgentTurnState::Unknown;
     runtime.last_turn_completed_at = None;
     runtime.transport = AgentTransport::PlainPty;
@@ -235,6 +243,8 @@ pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata
         _ => {
             runtime.session_path = None;
             runtime.progress_summary = None;
+            runtime.harness_mode = None;
+            runtime.turn_phase = None;
             runtime.turn_state = AgentTurnState::Unknown;
             runtime.last_turn_completed_at = None;
             runtime.transport = AgentTransport::PlainPty;
@@ -261,6 +271,8 @@ pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata
         Ok(Some(snapshot)) => {
             runtime.session_path = snapshot.session_path;
             runtime.progress_summary = snapshot.progress_summary;
+            runtime.harness_mode = snapshot.harness_mode;
+            runtime.turn_phase = snapshot.turn_phase;
             runtime.turn_state = snapshot.turn_state;
             runtime.last_turn_completed_at = snapshot.last_turn_completed_at;
             runtime.observer_started_at = None;
@@ -277,16 +289,22 @@ pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata
             if !matches!(runtime.harness, AgentHarness::Unknown) {
                 runtime.session_path = None;
                 runtime.progress_summary = None;
+                runtime.harness_mode = None;
+                runtime.turn_phase = None;
                 runtime.turn_state = AgentTurnState::Unknown;
                 runtime.last_turn_completed_at = None;
             }
         }
         Err(err) => {
             runtime.observer_error = Some(err.to_string());
+            runtime.harness_mode = None;
+            runtime.turn_phase = None;
         }
     }
 
     if matches!(runtime.harness, AgentHarness::Unknown) {
+        runtime.harness_mode = None;
+        runtime.turn_phase = None;
         runtime.turn_state = AgentTurnState::Unknown;
         runtime.last_turn_completed_at = None;
     }
@@ -304,7 +322,18 @@ pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata
 struct HarnessObservation {
     session_path: Option<String>,
     progress_summary: Option<String>,
+    harness_mode: Option<String>,
+    turn_phase: Option<String>,
     updated_at: Option<DateTime<Utc>>,
+    turn_state: AgentTurnState,
+    last_turn_completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug)]
+struct HarnessObservationDetails {
+    progress_summary: Option<String>,
+    harness_mode: Option<String>,
+    turn_phase: Option<String>,
     turn_state: AgentTurnState,
     last_turn_completed_at: Option<DateTime<Utc>>,
 }
@@ -330,14 +359,15 @@ fn observe_claude(
                 .map(|cutoff| modified_at >= cutoff)
                 .unwrap_or(true)
             {
-                let (progress_summary, turn_state, last_turn_completed_at) =
-                    read_last_claude_observation(preferred_path)?;
+                let details = read_last_claude_observation(preferred_path)?;
                 return Ok(Some(HarnessObservation {
                     session_path: Some(preferred_path.to_string_lossy().to_string()),
-                    progress_summary,
+                    progress_summary: details.progress_summary,
+                    harness_mode: details.harness_mode,
+                    turn_phase: details.turn_phase,
                     updated_at: Some(modified_at),
-                    turn_state,
-                    last_turn_completed_at,
+                    turn_state: details.turn_state,
+                    last_turn_completed_at: details.last_turn_completed_at,
                 }));
             }
         }
@@ -372,14 +402,15 @@ fn observe_claude(
     let Some((session, modified_at)) = selected else {
         return Ok(None);
     };
-    let (progress_summary, turn_state, last_turn_completed_at) =
-        read_last_claude_observation(&session)?;
+    let details = read_last_claude_observation(&session)?;
     Ok(Some(HarnessObservation {
         session_path: Some(session.to_string_lossy().to_string()),
-        progress_summary,
+        progress_summary: details.progress_summary,
+        harness_mode: details.harness_mode,
+        turn_phase: details.turn_phase,
         updated_at: Some(modified_at),
-        turn_state,
-        last_turn_completed_at,
+        turn_state: details.turn_state,
+        last_turn_completed_at: details.last_turn_completed_at,
     }))
 }
 
@@ -400,14 +431,15 @@ fn observe_codex(
                 .map(|cutoff| modified_at >= cutoff)
                 .unwrap_or(true)
             {
-                let (progress_summary, turn_state, last_turn_completed_at) =
-                    read_last_codex_observation(preferred_path)?;
+                let details = read_last_codex_observation(preferred_path)?;
                 return Ok(Some(HarnessObservation {
                     session_path: Some(preferred_path.to_string_lossy().to_string()),
-                    progress_summary,
+                    progress_summary: details.progress_summary,
+                    harness_mode: details.harness_mode,
+                    turn_phase: details.turn_phase,
                     updated_at: Some(modified_at),
-                    turn_state,
-                    last_turn_completed_at,
+                    turn_state: details.turn_state,
+                    last_turn_completed_at: details.last_turn_completed_at,
                 }));
             }
         }
@@ -458,14 +490,15 @@ fn observe_codex(
     let Some((session, modified_at)) = selected else {
         return Ok(None);
     };
-    let (progress_summary, turn_state, last_turn_completed_at) =
-        read_last_codex_observation(&session)?;
+    let details = read_last_codex_observation(&session)?;
     Ok(Some(HarnessObservation {
         session_path: Some(session.to_string_lossy().to_string()),
-        progress_summary,
+        progress_summary: details.progress_summary,
+        harness_mode: details.harness_mode,
+        turn_phase: details.turn_phase,
         updated_at: Some(modified_at),
-        turn_state,
-        last_turn_completed_at,
+        turn_state: details.turn_state,
+        last_turn_completed_at: details.last_turn_completed_at,
     }))
 }
 
@@ -537,11 +570,10 @@ fn parse_record_timestamp(record: &Value) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-fn read_last_claude_observation(
-    path: &Path,
-) -> anyhow::Result<(Option<String>, AgentTurnState, Option<DateTime<Utc>>)> {
+fn read_last_claude_observation(path: &Path) -> anyhow::Result<HarnessObservationDetails> {
     let reader = BufReader::new(fs::File::open(path)?);
     let mut summary = None;
+    let mut harness_mode = None;
     let mut last_user_at = None;
     let mut last_assistant_at = None;
     for line in reader.lines() {
@@ -589,6 +621,7 @@ fn read_last_claude_observation(
                     {
                         let plan = plan.trim();
                         if !plan.is_empty() {
+                            harness_mode = Some("plan".to_string());
                             parts.push(format!("PLAN: {plan}"));
                         }
                     }
@@ -601,22 +634,50 @@ fn read_last_claude_observation(
         }
     }
     let (turn_state, last_turn_completed_at) = derive_turn_state(last_user_at, last_assistant_at);
-    Ok((summary, turn_state, last_turn_completed_at))
+    Ok(HarnessObservationDetails {
+        progress_summary: summary,
+        harness_mode,
+        turn_phase: None,
+        turn_state,
+        last_turn_completed_at,
+    })
 }
 
-fn read_last_codex_observation(
-    path: &Path,
-) -> anyhow::Result<(Option<String>, AgentTurnState, Option<DateTime<Utc>>)> {
+fn read_last_codex_observation(path: &Path) -> anyhow::Result<HarnessObservationDetails> {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CodexTaskLifecycle {
+        Running,
+        Completed,
+        Aborted,
+    }
+
     let reader = BufReader::new(fs::File::open(path)?);
     let mut summary = None;
+    let mut harness_mode = None;
+    let mut turn_phase = None;
     let mut last_user_at = None;
     let mut last_assistant_at = None;
+    let mut last_lifecycle = None;
+    let mut last_lifecycle_at = None;
     for line in reader.lines() {
         let line = line?;
         let Ok(record) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         match record.get("type").and_then(Value::as_str) {
+            Some("turn_context") => {
+                if let Some(mode) = record
+                    .get("payload")
+                    .and_then(|payload| payload.get("collaboration_mode"))
+                    .and_then(|mode| mode.get("mode"))
+                    .and_then(Value::as_str)
+                {
+                    let mode = mode.trim();
+                    if !mode.is_empty() {
+                        harness_mode = Some(mode.to_string());
+                    }
+                }
+            }
             Some("response_item") => {
                 let Some(payload) = record.get("payload") else {
                     continue;
@@ -651,20 +712,88 @@ fn read_last_codex_observation(
                     _ => {}
                 }
             }
-            Some("event_msg")
-                if record
-                    .get("payload")
-                    .and_then(|payload| payload.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("user_message") =>
-            {
-                last_user_at = parse_record_timestamp(&record).or(last_user_at);
+            Some("event_msg") => {
+                let Some(payload) = record.get("payload") else {
+                    continue;
+                };
+                match payload.get("type").and_then(Value::as_str) {
+                    Some("user_message") => {
+                        last_user_at = parse_record_timestamp(&record).or(last_user_at);
+                    }
+                    Some("task_started") => {
+                        last_lifecycle = Some(CodexTaskLifecycle::Running);
+                        last_lifecycle_at = parse_record_timestamp(&record).or(last_lifecycle_at);
+                        if turn_phase.is_none() {
+                            turn_phase = Some("started".to_string());
+                        }
+                        if let Some(mode) = payload
+                            .get("collaboration_mode_kind")
+                            .and_then(Value::as_str)
+                        {
+                            let mode = mode.trim();
+                            if !mode.is_empty() {
+                                harness_mode = Some(mode.to_string());
+                            }
+                        }
+                    }
+                    Some("agent_message") => {
+                        last_assistant_at = parse_record_timestamp(&record).or(last_assistant_at);
+                        if let Some(phase) = payload.get("phase").and_then(Value::as_str) {
+                            let phase = phase.trim();
+                            if !phase.is_empty() {
+                                turn_phase = Some(phase.to_string());
+                            }
+                        }
+                    }
+                    Some("task_complete") => {
+                        last_lifecycle = Some(CodexTaskLifecycle::Completed);
+                        last_lifecycle_at = parse_record_timestamp(&record).or(last_lifecycle_at);
+                        last_assistant_at = parse_record_timestamp(&record).or(last_assistant_at);
+                        if turn_phase.is_none() {
+                            turn_phase = Some("complete".to_string());
+                        }
+                        if summary.is_none() {
+                            if let Some(last_message) =
+                                payload.get("last_agent_message").and_then(Value::as_str)
+                            {
+                                let last_message = last_message.trim();
+                                if !last_message.is_empty() {
+                                    summary = Some(truncate_summary(last_message));
+                                }
+                            }
+                        }
+                    }
+                    Some("turn_aborted") => {
+                        last_lifecycle = Some(CodexTaskLifecycle::Aborted);
+                        last_lifecycle_at = parse_record_timestamp(&record).or(last_lifecycle_at);
+                        turn_phase = Some("aborted".to_string());
+                    }
+                    _ => {}
+                }
             }
             _ => {}
         }
     }
-    let (turn_state, last_turn_completed_at) = derive_turn_state(last_user_at, last_assistant_at);
-    Ok((summary, turn_state, last_turn_completed_at))
+    let (mut turn_state, mut last_turn_completed_at) =
+        derive_turn_state(last_user_at, last_assistant_at);
+    match last_lifecycle {
+        Some(CodexTaskLifecycle::Running) => {
+            turn_state = AgentTurnState::WaitingOnAgent;
+            last_turn_completed_at = None;
+        }
+        Some(CodexTaskLifecycle::Completed) | Some(CodexTaskLifecycle::Aborted) => {
+            turn_state = AgentTurnState::WaitingOnUser;
+            last_turn_completed_at = last_lifecycle_at.or(last_turn_completed_at);
+        }
+        None => {}
+    }
+    Ok(HarnessObservationDetails {
+        progress_summary: summary,
+        harness_mode,
+        turn_phase,
+        turn_state,
+        last_turn_completed_at,
+    })
 }
 
 fn truncate_summary(summary: &str) -> String {
@@ -775,6 +904,8 @@ mod test {
         remove_env_var("WEZTERM_AGENT_CLAUDE_DIR");
 
         assert_eq!(observed.progress_summary.as_deref(), Some("done"));
+        assert_eq!(observed.harness_mode, None);
+        assert_eq!(observed.turn_phase, None);
         assert_eq!(
             observed.session_path.as_deref(),
             Some(session.to_string_lossy().as_ref())
@@ -802,8 +933,12 @@ mod test {
             &session,
             concat!(
                 "{\"payload\":{\"cwd\":\"/tmp/project-b\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"default\"}}\n",
+                "{\"type\":\"turn_context\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"collaboration_mode\":{\"mode\":\"plan\"}}}\n",
                 "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[]}}\n",
-                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:03Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"all good\"}]}}\n"
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:02Z\",\"payload\":{\"type\":\"agent_message\",\"phase\":\"final_answer\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:03Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"all good\"}]}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:04Z\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"all good\"}}\n"
             ),
         )
         .unwrap();
@@ -815,10 +950,88 @@ mod test {
         remove_env_var("WEZTERM_AGENT_CODEX_DIR");
 
         assert_eq!(observed.progress_summary.as_deref(), Some("all good"));
+        assert_eq!(observed.harness_mode.as_deref(), Some("plan"));
+        assert_eq!(observed.turn_phase.as_deref(), Some("final_answer"));
         assert_eq!(
             observed.session_path.as_deref(),
             Some(session.to_string_lossy().as_ref())
         );
+        assert_eq!(observed.turn_state, AgentTurnState::WaitingOnUser);
+        assert_eq!(
+            observed.last_turn_completed_at,
+            Some(Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 4).unwrap())
+        );
+    }
+
+    #[test]
+    fn observe_codex_keeps_waiting_on_agent_during_commentary() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let day = Utc::now();
+        let dir = temp
+            .path()
+            .join(format!("{:04}", day.year_ce().1))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("rollout-commentary.jsonl");
+        fs::write(
+            &session,
+            concat!(
+                "{\"payload\":{\"cwd\":\"/tmp/project-f\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"default\"}}\n",
+                "{\"type\":\"turn_context\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"collaboration_mode\":{\"mode\":\"plan\"}}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"user_message\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:02Z\",\"payload\":{\"type\":\"agent_message\",\"phase\":\"commentary\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:02Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"thinking\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        set_env_path("WEZTERM_AGENT_CODEX_DIR", temp.path());
+        let observed = observe_codex("/tmp/project-f", None, None)
+            .unwrap()
+            .unwrap();
+        remove_env_var("WEZTERM_AGENT_CODEX_DIR");
+
+        assert_eq!(observed.progress_summary.as_deref(), Some("thinking"));
+        assert_eq!(observed.harness_mode.as_deref(), Some("plan"));
+        assert_eq!(observed.turn_phase.as_deref(), Some("commentary"));
+        assert_eq!(observed.turn_state, AgentTurnState::WaitingOnAgent);
+        assert_eq!(observed.last_turn_completed_at, None);
+    }
+
+    #[test]
+    fn observe_codex_marks_aborted_turn_as_waiting_on_user() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let day = Utc::now();
+        let dir = temp
+            .path()
+            .join(format!("{:04}", day.year_ce().1))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("rollout-aborted.jsonl");
+        fs::write(
+            &session,
+            concat!(
+                "{\"payload\":{\"cwd\":\"/tmp/project-g\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"default\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:01Z\",\"payload\":{\"type\":\"user_message\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:03Z\",\"payload\":{\"type\":\"turn_aborted\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        set_env_path("WEZTERM_AGENT_CODEX_DIR", temp.path());
+        let observed = observe_codex("/tmp/project-g", None, None)
+            .unwrap()
+            .unwrap();
+        remove_env_var("WEZTERM_AGENT_CODEX_DIR");
+
+        assert_eq!(observed.harness_mode.as_deref(), Some("default"));
+        assert_eq!(observed.turn_phase.as_deref(), Some("aborted"));
         assert_eq!(observed.turn_state, AgentTurnState::WaitingOnUser);
         assert_eq!(
             observed.last_turn_completed_at,
@@ -907,6 +1120,8 @@ mod test {
         assert_eq!(runtime.harness, AgentHarness::Codex);
         assert_eq!(runtime.transport, AgentTransport::PlainPty);
         assert_eq!(runtime.session_path, None);
+        assert_eq!(runtime.harness_mode, None);
+        assert_eq!(runtime.turn_phase, None);
         assert_eq!(runtime.turn_state, AgentTurnState::Unknown);
     }
 
@@ -951,6 +1166,8 @@ mod test {
         remove_env_var("WEZTERM_AGENT_CODEX_DIR");
 
         assert_eq!(observed.progress_summary.as_deref(), Some("older"));
+        assert_eq!(observed.harness_mode, None);
+        assert_eq!(observed.turn_phase, None);
         assert_eq!(
             observed.session_path.as_deref(),
             Some(older.to_string_lossy().as_ref())

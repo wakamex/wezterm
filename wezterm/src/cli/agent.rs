@@ -1588,13 +1588,38 @@ fn transport_label(transport: &AgentTransport) -> String {
 }
 
 fn inline_progress_summary(agent: &AgentSnapshot) -> String {
-    agent
+    let summary = agent
         .runtime
         .progress_summary
         .as_deref()
         .or(agent.runtime.observer_error.as_deref())
         .map(|summary| summary.replace('\n', " "))
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let mut tags = vec![];
+    if let Some(mode) = agent.runtime.harness_mode.as_deref() {
+        let mode = mode.trim();
+        if !mode.is_empty() {
+            tags.push(mode.replace('_', "-"));
+        }
+    }
+    if let Some(phase) = agent.runtime.turn_phase.as_deref() {
+        let phase = phase.trim();
+        if !phase.is_empty() {
+            tags.push(phase.replace('_', "-"));
+        }
+    }
+
+    if tags.is_empty() {
+        return summary;
+    }
+
+    let prefix = format!("[{}]", tags.join(" "));
+    if summary.is_empty() {
+        prefix
+    } else {
+        format!("{prefix} {summary}")
+    }
 }
 
 #[cfg(test)]
@@ -1705,6 +1730,8 @@ mod test {
                 observed_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
                 session_path: None,
                 progress_summary: None,
+                harness_mode: None,
+                turn_phase: None,
                 terminal_progress: wezterm_term::Progress::None,
                 observer_error: None,
                 observer_started_at: None,
@@ -1843,6 +1870,19 @@ mod test {
         assert_eq!(key_calls[0].pane_id, 30);
         assert_eq!(key_calls[0].event.key, KeyCode::Enter);
         assert_eq!(key_calls[0].event.modifiers, Modifiers::NONE);
+    }
+
+    #[test]
+    fn inline_progress_summary_prefixes_harness_mode_and_phase() {
+        let mut agent = sample_agent(30, "reviewer");
+        agent.runtime.harness_mode = Some("plan".to_string());
+        agent.runtime.turn_phase = Some("final_answer".to_string());
+        agent.runtime.progress_summary = Some("all good".to_string());
+
+        assert_eq!(
+            inline_progress_summary(&agent),
+            "[plan final-answer] all good"
+        );
     }
 
     #[test]
