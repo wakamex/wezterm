@@ -1188,8 +1188,9 @@ impl SendAgentCommand {
             .with_context(|| format!("no agent named or identified by {}", self.target))?;
         let text = self.read_text()?;
         let baseline = AgentAckBaseline::from_agent(&agent);
+        let use_raw_write = self.no_paste || prefers_raw_input(&agent.runtime.harness);
 
-        if self.no_paste {
+        if use_raw_write {
             write_to_pane(codec::WriteToPane {
                 pane_id: agent.pane_id,
                 data: text.into_bytes(),
@@ -1282,6 +1283,10 @@ impl SendAgentCommand {
         )
         .await
     }
+}
+
+fn prefers_raw_input(harness: &AgentHarness) -> bool {
+    matches!(harness, AgentHarness::Gemini)
 }
 
 async fn submit_native_harness_prompt<WriteToPaneFn, WriteToPaneFut>(
@@ -2393,6 +2398,50 @@ mod test {
         assert_eq!(write_calls.len(), 1);
         assert_eq!(write_calls[0].pane_id, 30);
         assert_eq!(write_calls[0].data, b"\r");
+    }
+
+    #[test]
+    fn send_defaults_to_raw_write_for_gemini() {
+        let write_calls = Rc::new(RefCell::new(vec![]));
+        let command = SendAgentCommand {
+            target: "reviewer".to_string(),
+            no_paste: false,
+            no_submit: true,
+            ack_timeout_ms: 0,
+            ack_poll_ms: 0,
+            text: Some("fix this".to_string()),
+        };
+
+        let mut baseline = sample_agent(30, "reviewer");
+        baseline.runtime.harness = mux::agent::AgentHarness::Gemini;
+        baseline.runtime.foreground_process_name = Some("node".to_string());
+
+        let result = promise::spawn::block_on(command.run_with(
+            move || {
+                let baseline = baseline.clone();
+                async move {
+                    Ok(ListAgentsResponse {
+                        agents: vec![baseline],
+                    })
+                }
+            },
+            {
+                let write_calls = Rc::clone(&write_calls);
+                move |request: WriteToPane| {
+                    write_calls.borrow_mut().push(request);
+                    async { Ok(UnitResponse {}) }
+                }
+            },
+            |_| async { panic!("send_paste should not be used for gemini") },
+        ))
+        .unwrap();
+
+        assert_eq!(result.agent_name, "reviewer");
+        assert_eq!(result.acknowledgement.kind, AgentAckKind::NotRequested);
+        let write_calls = write_calls.borrow();
+        assert_eq!(write_calls.len(), 1);
+        assert_eq!(write_calls[0].pane_id, 30);
+        assert_eq!(write_calls[0].data, b"fix this");
     }
 
     #[test]
