@@ -29,6 +29,8 @@ pub enum AgentHarness {
     Unknown,
     Claude,
     Codex,
+    Gemini,
+    Opencode,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,6 +166,12 @@ pub fn infer_harness(launch_cmd: &str, foreground_process_name: Option<&str>) ->
         if candidate.contains("codex") {
             return AgentHarness::Codex;
         }
+        if candidate.contains("gemini") {
+            return AgentHarness::Gemini;
+        }
+        if candidate.contains("opencode") {
+            return AgentHarness::Opencode;
+        }
     }
     AgentHarness::Unknown
 }
@@ -291,6 +299,7 @@ pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata
             runtime.session_path.as_deref(),
             runtime.observer_started_at,
         ),
+        AgentHarness::Gemini | AgentHarness::Opencode => Ok(None),
         AgentHarness::Unknown => Ok(None),
     };
 
@@ -873,6 +882,11 @@ mod test {
         assert_eq!(
             infer_harness("codex --model gpt-5", None),
             AgentHarness::Codex
+        );
+        assert_eq!(infer_harness("gemini --yolo", None), AgentHarness::Gemini);
+        assert_eq!(
+            infer_harness("opencode serve", None),
+            AgentHarness::Opencode
         );
         assert_eq!(
             infer_harness("python agent.py", Some("claude")),

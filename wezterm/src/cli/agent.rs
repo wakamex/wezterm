@@ -1,7 +1,7 @@
 use crate::cli::{resolve_relative_cwd, CliOutputFormatKind};
 use anyhow::{bail, Context};
 use chrono::Utc;
-use clap::{Parser, Subcommand, ValueHint};
+use clap::{Parser, Subcommand, ValueEnum, ValueHint};
 use codec::{InputSerial, ListPanesResponse, SendKeyDown, SpawnV2, TabTitleChanged};
 use config::keyassignment::SpawnTabDomain;
 use config::ConfigHandle;
@@ -36,11 +36,11 @@ pub struct AgentCommand {
 enum AgentSubCommand {
     #[command(
         name = "start",
-        about = "start a managed agent in the current pane, a split, a new tab, or a new window"
+        about = "start an agent harness in the current pane, a split, a new tab, or a new window"
     )]
     Start(SpawnAgentCommand),
 
-    #[command(name = "adopt", about = "adopt an existing pane as a managed agent")]
+    #[command(name = "adopt", about = "adopt an existing pane as an agent")]
     Adopt(AdoptAgentCommand),
 
     #[command(name = "list", about = "list agent-tagged panes")]
@@ -111,8 +111,40 @@ struct PaneContext {
     cwd: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum AgentStartHarness {
+    Claude,
+    Codex,
+    Gemini,
+    Opencode,
+}
+
+impl AgentStartHarness {
+    fn as_agent_harness(self) -> AgentHarness {
+        match self {
+            Self::Claude => AgentHarness::Claude,
+            Self::Codex => AgentHarness::Codex,
+            Self::Gemini => AgentHarness::Gemini,
+            Self::Opencode => AgentHarness::Opencode,
+        }
+    }
+
+    fn default_command(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Opencode => "opencode",
+        }
+    }
+}
+
 #[derive(Debug, Parser, Clone)]
 pub struct SpawnAgentCommand {
+    /// Built-in harness to launch. Preferred for claude/codex/gemini/opencode.
+    #[arg(value_enum, value_name = "HARNESS", required_unless_present = "cmd")]
+    harness: Option<AgentStartHarness>,
+
     /// Start the harness in the current pane instead of creating a new pane/tab/window.
     #[arg(long, conflicts_with_all = &["split", "new_window", "workspace", "horizontal", "left", "right", "top", "bottom", "cells", "percent"])]
     here: bool,
@@ -185,12 +217,41 @@ pub struct SpawnAgentCommand {
     #[arg(long, value_parser, value_hint = ValueHint::DirPath)]
     cwd: Option<OsString>,
 
-    /// Command line to launch inside the new pane
+    /// Explicit command line to launch. Overrides the default command for the selected harness.
     #[arg(long)]
-    cmd: String,
+    cmd: Option<String>,
 }
 
 impl SpawnAgentCommand {
+    fn resolved_harness(&self) -> anyhow::Result<AgentHarness> {
+        if let Some(harness) = self.harness {
+            return Ok(harness.as_agent_harness());
+        }
+
+        let launch_cmd = self
+            .cmd
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("agent start requires a harness name or --cmd"))?;
+        let harness = infer_harness(launch_cmd, None);
+        anyhow::ensure!(
+            !matches!(harness, AgentHarness::Unknown),
+            "agent start requires a recognized harness (currently: claude, codex, gemini, opencode); if you are using a wrapper command, specify the harness positionally and pass the wrapper via --cmd"
+        );
+        Ok(harness)
+    }
+
+    fn resolved_launch_cmd(&self) -> anyhow::Result<&str> {
+        if let Some(cmd) = self.cmd.as_deref() {
+            anyhow::ensure!(!cmd.trim().is_empty(), "--cmd must not be empty");
+            return Ok(cmd);
+        }
+
+        let harness = self
+            .harness
+            .ok_or_else(|| anyhow::anyhow!("agent start requires a harness name or --cmd"))?;
+        Ok(harness.default_command())
+    }
+
     async fn run(&self, client: Client, config: &ConfigHandle) -> anyhow::Result<()> {
         let snapshot = self
             .run_with(
@@ -309,7 +370,9 @@ impl SpawnAgentCommand {
         });
 
         let agents = list_agents().await?.agents;
-        let agent_name = resolve_spawn_agent_name(&self.cmd, self.name.as_deref(), &agents)?;
+        let harness = self.resolved_harness()?;
+        let launch_cmd = self.resolved_launch_cmd()?;
+        let agent_name = resolve_spawn_agent_name(harness, self.name.as_deref(), &agents)?;
 
         let prepared = prepare_launch(
             self,
@@ -348,7 +411,7 @@ impl SpawnAgentCommand {
             let launch_text = build_in_place_launch_command(
                 pane_context.cwd.as_deref(),
                 &prepared.command_dir,
-                &self.cmd,
+                launch_cmd,
                 self.replace,
             )?;
 
@@ -511,11 +574,8 @@ impl SpawnAgentCommand {
         _agents: &[AgentSnapshot],
         current_cwd: Option<String>,
     ) -> anyhow::Result<PreparedAgentLaunch> {
-        let harness = infer_harness(&self.cmd, None);
-        anyhow::ensure!(
-            !matches!(harness, AgentHarness::Unknown),
-            "agent start requires a recognized harness command (currently: codex, claude); use agent adopt for generic panes"
-        );
+        let _harness = self.resolved_harness()?;
+        let launch_cmd = self.resolved_launch_cmd()?;
 
         let repo_root = self
             .repo
@@ -560,8 +620,8 @@ impl SpawnAgentCommand {
             );
 
         Ok(PreparedAgentLaunch {
-            command: command_builder_from_cmd(&self.cmd)?,
-            launch_cmd: self.cmd.clone(),
+            command: command_builder_from_cmd(launch_cmd)?,
+            launch_cmd: launch_cmd.to_string(),
             command_dir,
             repo_root: repo_root.as_ref().map(|path| path_to_string(path)),
             worktree: worktree_path.as_ref().map(|path| path_to_string(path)),
@@ -612,7 +672,7 @@ fn next_available_agent_name(agents: &[AgentSnapshot], base_name: &str) -> Strin
 }
 
 fn resolve_spawn_agent_name(
-    cmd: &str,
+    harness: AgentHarness,
     requested_name: Option<&str>,
     agents: &[AgentSnapshot],
 ) -> anyhow::Result<String> {
@@ -621,12 +681,14 @@ fn resolve_spawn_agent_name(
         return Ok(name.to_string());
     }
 
-    let base_name = match infer_harness(cmd, None) {
+    let base_name = match harness {
         AgentHarness::Codex => "codex",
         AgentHarness::Claude => "claude",
+        AgentHarness::Gemini => "gemini",
+        AgentHarness::Opencode => "opencode",
         AgentHarness::Unknown => {
             bail!(
-                "agent start requires a recognized harness command (currently: codex, claude); use agent adopt for generic panes"
+                "agent start requires a recognized harness (currently: claude, codex, gemini, opencode)"
             )
         }
     };
@@ -1892,6 +1954,8 @@ fn harness_label(harness: &AgentHarness) -> String {
         AgentHarness::Unknown => "unknown",
         AgentHarness::Claude => "claude",
         AgentHarness::Codex => "codex",
+        AgentHarness::Gemini => "gemini",
+        AgentHarness::Opencode => "opencode",
     }
     .to_string()
 }
@@ -2625,6 +2689,7 @@ mod test {
         let split_calls = Rc::new(RefCell::new(vec![]));
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: Some("reviewer".to_string()),
             here: false,
             replace: false,
@@ -2643,7 +2708,7 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: None,
-            cmd: "codex --model gpt-5".to_string(),
+            cmd: Some("codex --model gpt-5".to_string()),
         };
         let left_size = size(80, 24);
         let right_size = size(39, 24);
@@ -2724,6 +2789,7 @@ mod test {
         let title_calls = Rc::new(RefCell::new(vec![]));
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: Some("reviewer".to_string()),
             here: false,
             replace: false,
@@ -2742,7 +2808,7 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: None,
-            cmd: "codex".to_string(),
+            cmd: None,
         };
         let root_size = size(80, 24);
 
@@ -2811,6 +2877,7 @@ mod test {
     fn spawn_cleans_up_spawned_pane_when_metadata_attachment_fails() {
         let kill_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: Some("reviewer".to_string()),
             here: false,
             replace: false,
@@ -2829,7 +2896,7 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: None,
-            cmd: "codex".to_string(),
+            cmd: None,
         };
 
         let err = promise::spawn::block_on(command.run_with(
@@ -2870,6 +2937,7 @@ mod test {
     fn spawn_cleans_up_spawned_pane_when_initial_tab_title_fails() {
         let kill_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: Some("reviewer".to_string()),
             here: false,
             replace: false,
@@ -2888,7 +2956,7 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: None,
-            cmd: "codex".to_string(),
+            cmd: None,
         };
 
         let err = promise::spawn::block_on(command.run_with(
@@ -2932,6 +3000,7 @@ mod test {
         let title_calls = Rc::new(RefCell::new(vec![]));
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: Some("scrape-api".to_string()),
             here: false,
             replace: false,
@@ -2950,7 +3019,7 @@ mod test {
             worktree: WorktreeMode::Auto,
             branch: Some("agent/scrape-api".to_string()),
             cwd: None,
-            cmd: "codex".to_string(),
+            cmd: None,
         };
         let expected_worktree = auto_worktree_path(&repo_root, "scrape-api");
 
@@ -3037,6 +3106,7 @@ mod test {
         let (_temp, repo_root) = init_git_repo();
         let requested_worktree = auto_worktree_path(&repo_root, "alpha");
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: Some("beta".to_string()),
             here: false,
             replace: false,
@@ -3055,7 +3125,7 @@ mod test {
             worktree: WorktreeMode::Path(requested_worktree.clone()),
             branch: None,
             cwd: None,
-            cmd: "codex".to_string(),
+            cmd: None,
         };
         let mut owner = sample_agent(40, "alpha");
         owner.metadata.worktree = Some(requested_worktree.to_string_lossy().to_string());
@@ -3070,6 +3140,7 @@ mod test {
     #[test]
     fn spawn_rejects_unrecognized_harness_commands() {
         let command = SpawnAgentCommand {
+            harness: None,
             name: Some("shell".to_string()),
             here: false,
             replace: false,
@@ -3088,13 +3159,40 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: None,
-            cmd: "zsh".to_string(),
+            cmd: Some("zsh".to_string()),
         };
 
         let err = command.prepare_launch("shell", &[], None).unwrap_err();
         assert!(err
             .to_string()
-            .contains("agent start requires a recognized harness command"));
+            .contains("agent start requires a recognized harness"));
+    }
+
+    #[test]
+    fn start_parser_accepts_positional_harness() {
+        let parsed = AgentCommand::try_parse_from(["agent", "start", "gemini"]).unwrap();
+        let AgentSubCommand::Start(command) = parsed.sub else {
+            panic!("expected start command");
+        };
+        assert_eq!(command.harness, Some(AgentStartHarness::Gemini));
+        assert_eq!(command.cmd, None);
+    }
+
+    #[test]
+    fn start_parser_allows_cmd_override_for_positional_harness() {
+        let parsed = AgentCommand::try_parse_from([
+            "agent",
+            "start",
+            "codex",
+            "--cmd",
+            "codex --profile fast",
+        ])
+        .unwrap();
+        let AgentSubCommand::Start(command) = parsed.sub else {
+            panic!("expected start command");
+        };
+        assert_eq!(command.harness, Some(AgentStartHarness::Codex));
+        assert_eq!(command.cmd.as_deref(), Some("codex --profile fast"));
     }
 
     #[test]
@@ -3103,6 +3201,7 @@ mod test {
         let title_calls = Rc::new(RefCell::new(vec![]));
         let set_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: None,
             here: false,
             replace: false,
@@ -3121,7 +3220,7 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: None,
-            cmd: "codex".to_string(),
+            cmd: None,
         };
 
         let agent = promise::spawn::block_on(command.run_with(
@@ -3181,12 +3280,20 @@ mod test {
     fn spawn_without_name_uses_next_numeric_suffix() {
         let agents = vec![sample_agent(41, "codex"), sample_agent(42, "codex2")];
         assert_eq!(
-            resolve_spawn_agent_name("codex", None, &agents).unwrap(),
+            resolve_spawn_agent_name(AgentHarness::Codex, None, &agents).unwrap(),
             "codex3"
         );
         assert_eq!(
-            resolve_spawn_agent_name("claude", None, &agents).unwrap(),
+            resolve_spawn_agent_name(AgentHarness::Claude, None, &agents).unwrap(),
             "claude"
+        );
+        assert_eq!(
+            resolve_spawn_agent_name(AgentHarness::Gemini, None, &agents).unwrap(),
+            "gemini"
+        );
+        assert_eq!(
+            resolve_spawn_agent_name(AgentHarness::Opencode, None, &agents).unwrap(),
+            "opencode"
         );
     }
 
@@ -3198,6 +3305,7 @@ mod test {
         let set_calls = Rc::new(RefCell::new(vec![]));
         let clear_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: None,
             here: true,
             replace: false,
@@ -3216,7 +3324,7 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: Some("/tmp/agent-start".into()),
-            cmd: "codex".to_string(),
+            cmd: None,
         };
 
         let agent = promise::spawn::block_on(command.run_with(
@@ -3314,6 +3422,7 @@ mod test {
         let set_calls = Rc::new(RefCell::new(vec![]));
         let clear_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: Some("codex-here".to_string()),
             here: true,
             replace: false,
@@ -3332,7 +3441,7 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: None,
-            cmd: "codex".to_string(),
+            cmd: None,
         };
 
         let err = promise::spawn::block_on(command.run_with(
@@ -3389,6 +3498,7 @@ mod test {
     fn start_here_replace_injects_exec_into_existing_pane() {
         let paste_calls = Rc::new(RefCell::new(vec![]));
         let command = SpawnAgentCommand {
+            harness: Some(AgentStartHarness::Codex),
             name: Some("codex-replace".to_string()),
             here: true,
             replace: true,
@@ -3407,7 +3517,7 @@ mod test {
             worktree: WorktreeMode::None,
             branch: None,
             cwd: Some("/tmp/agent-start".into()),
-            cmd: "codex".to_string(),
+            cmd: None,
         };
 
         promise::spawn::block_on(command.run_with(
