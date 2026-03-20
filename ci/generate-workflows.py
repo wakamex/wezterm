@@ -725,27 +725,32 @@ rustup default {toolchain}
     def create_winget_pr(self):
         steps = []
         if "windows" in self.name:
+            winget_enabled = "vars.WAKTERM_WINGET_REPO != '' && secrets.GH_PAT != ''"
             steps += [
                 ActionStep(
                     "Checkout winget-pkgs",
                     action="actions/checkout@v6",
                     params={
-                        "repository": "wez/winget-pkgs",
+                        "repository": "${{ vars.WAKTERM_WINGET_REPO }}",
                         "path": "winget-pkgs",
                         "token": "${{ secrets.GH_PAT }}",
                     },
+                    condition=winget_enabled,
                 ),
                 RunStep(
                     "Setup email for winget repo",
-                    "cd winget-pkgs && git config user.email wez@wezfurlong.org",
+                    "cd winget-pkgs && git config user.email 41898282+github-actions[bot]@users.noreply.github.com",
+                    condition=winget_enabled,
                 ),
                 RunStep(
                     "Setup name for winget repo",
-                    "cd winget-pkgs && git config user.name 'Wez Furlong'",
+                    "cd winget-pkgs && git config user.name 'github-actions[bot]'",
+                    condition=winget_enabled,
                 ),
                 RunStep(
                     "Create winget manifest and push to fork",
                     "bash ci/make-winget-pr.sh winget-pkgs wakterm-*.exe",
+                    condition=winget_enabled,
                 ),
                 RunStep(
                     "Submit PR",
@@ -753,6 +758,7 @@ rustup default {toolchain}
                     env={
                         "GITHUB_TOKEN": "${{ secrets.GH_PAT }}",
                     },
+                    condition=winget_enabled,
                 ),
             ]
 

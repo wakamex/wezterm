@@ -4,6 +4,9 @@ set -xe
 winget_repo=$1
 setup_exe=$2
 TAG_NAME=$(ci/tag-name.sh)
+PACKAGE_IDENTIFIER="wakamex.wakterm"
+PUBLISHER="wakamex"
+MANIFEST_ROOT="manifests/w/wakamex/wakterm/$TAG_NAME"
 
 cd "$winget_repo" || exit 1
 
@@ -17,10 +20,10 @@ exehash=$(sha256sum -b ../$setup_exe | cut -f1 -d' ' | tr a-f A-F)
 release_date=$(git show -s "--format=%cd" "--date=format:%Y-%m-%d")
 
 # Create the directory structure
-mkdir manifests/w/wakterm/wakterm/$TAG_NAME
+mkdir -p "$MANIFEST_ROOT"
 
-cat > manifests/w/wakterm/wakterm/$TAG_NAME/wez.wakterm.installer.yaml <<-EOT
-PackageIdentifier: wez.wakterm
+cat > "$MANIFEST_ROOT/$PACKAGE_IDENTIFIER.installer.yaml" <<-EOT
+PackageIdentifier: $PACKAGE_IDENTIFIER
 PackageVersion: $TAG_NAME
 MinimumOSVersion: 10.0.17763.0
 InstallerType: inno
@@ -35,16 +38,16 @@ ManifestType: installer
 ManifestVersion: 1.1.0
 EOT
 
-cat > manifests/w/wakterm/wakterm/$TAG_NAME/wez.wakterm.locale.en-US.yaml <<-EOT
-PackageIdentifier: wez.wakterm
+cat > "$MANIFEST_ROOT/$PACKAGE_IDENTIFIER.locale.en-US.yaml" <<-EOT
+PackageIdentifier: $PACKAGE_IDENTIFIER
 PackageVersion: $TAG_NAME
 PackageLocale: en-US
-Publisher: Wez Furlong
-PublisherUrl: https://wezfurlong.org/
+Publisher: $PUBLISHER
+PublisherUrl: https://github.com/wakamex
 PublisherSupportUrl: https://github.com/wakamex/wakterm/issues
-Author: Wez Furlong
+Author: $PUBLISHER
 PackageName: wakterm
-PackageUrl: http://wakterm.org
+PackageUrl: https://wakterm.org
 License: MIT
 LicenseUrl: https://github.com/wakamex/wakterm/blob/main/LICENSE.md
 ShortDescription: A GPU-accelerated cross-platform terminal emulator and multiplexer implemented in Rust
@@ -53,8 +56,8 @@ ManifestType: defaultLocale
 ManifestVersion: 1.1.0
 EOT
 
-cat > manifests/w/wakterm/wakterm/$TAG_NAME/wez.wakterm.yaml <<-EOT
-PackageIdentifier: wez.wakterm
+cat > "$MANIFEST_ROOT/$PACKAGE_IDENTIFIER.yaml" <<-EOT
+PackageIdentifier: $PACKAGE_IDENTIFIER
 PackageVersion: $TAG_NAME
 DefaultLocale: en-US
 ManifestType: version
@@ -63,5 +66,5 @@ EOT
 
 git add --all
 git diff --cached
-git commit -m "New version: wez.wakterm version $TAG_NAME"
+git commit -m "New version: $PACKAGE_IDENTIFIER version $TAG_NAME"
 git push --set-upstream origin "$TAG_NAME" --quiet

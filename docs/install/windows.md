@@ -40,13 +40,13 @@ that is available from the Microsoft Store.
 Once you have `winget`, you can install wakterm like so:
 
 ```console
-$ winget install wez.wakterm
+$ winget install wakamex.wakterm
 ```
 
 and to later upgrade it:
 
 ```console
-$ winget upgrade wez.wakterm
+$ winget upgrade wakamex.wakterm
 ```
 
 ### For `Scoop` users

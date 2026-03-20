@@ -110,20 +110,25 @@ jobs:
         run: "bash ci/retry.sh gh release upload --clobber $(ci/tag-name.sh) wakterm-*.zip wakterm-*.exe *.sha256"
       - name: "Checkout winget-pkgs"
         uses: actions/checkout@v6
+        if: vars.WAKTERM_WINGET_REPO != '' && secrets.GH_PAT != ''
         with:
-          repository: "wez/winget-pkgs"
+          repository: "${{ vars.WAKTERM_WINGET_REPO }}"
           path: "winget-pkgs"
           token: "${{ secrets.GH_PAT }}"
       - name: "Setup email for winget repo"
+        if: vars.WAKTERM_WINGET_REPO != '' && secrets.GH_PAT != ''
         shell: bash
-        run: "cd winget-pkgs && git config user.email wez@wezfurlong.org"
+        run: "cd winget-pkgs && git config user.email 41898282+github-actions[bot]@users.noreply.github.com"
       - name: "Setup name for winget repo"
+        if: vars.WAKTERM_WINGET_REPO != '' && secrets.GH_PAT != ''
         shell: bash
-        run: "cd winget-pkgs && git config user.name 'Wez Furlong'"
+        run: "cd winget-pkgs && git config user.name 'github-actions[bot]'"
       - name: "Create winget manifest and push to fork"
+        if: vars.WAKTERM_WINGET_REPO != '' && secrets.GH_PAT != ''
         shell: bash
         run: "bash ci/make-winget-pr.sh winget-pkgs wakterm-*.exe"
       - name: "Submit PR"
+        if: vars.WAKTERM_WINGET_REPO != '' && secrets.GH_PAT != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         shell: bash
