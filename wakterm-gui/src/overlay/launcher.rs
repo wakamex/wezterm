@@ -97,7 +97,7 @@ impl LauncherArgs {
                 .iter()
                 .enumerate()
                 .map(|(tab_idx, tab)| {
-                    let tab_title = tab.get_title();
+                    let tab_title = mux.effective_tab_title(tab.tab_id());
                     let title = if tab_title.is_empty() {
                         tab.get_active_pane()
                             .expect("tab to have a pane")

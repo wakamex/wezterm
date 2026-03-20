@@ -3531,7 +3531,7 @@ impl TermWindow {
                     is_active: tab_index == Some(idx),
                     is_last_active: last_active_idx == Some(idx),
                     window_id: self.mux_window_id,
-                    tab_title: tab.get_title(),
+                    tab_title: mux.effective_tab_title(tab.tab_id()),
                     active_pane: panes
                         .iter()
                         .find(|p| p.is_active)
