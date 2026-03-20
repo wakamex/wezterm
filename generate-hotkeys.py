@@ -43,6 +43,64 @@ def find_matching_brace(content, open_brace_idx):
     return p
 
 
+def find_matching_delim(content, open_idx, open_char, close_char):
+    depth = 1
+    i = open_idx + 1
+    in_string = False
+    in_line_comment = False
+    in_block_comment = 0
+
+    while i < len(content) and depth > 0:
+        if in_line_comment:
+            if content[i] == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if in_block_comment:
+            if content.startswith("/*", i):
+                in_block_comment += 1
+                i += 2
+                continue
+            if content.startswith("*/", i):
+                in_block_comment -= 1
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if in_string:
+            if content[i] == "\\":
+                i += 2
+                continue
+            if content[i] == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if content.startswith("//", i):
+            in_line_comment = True
+            i += 2
+            continue
+        if content.startswith("/*", i):
+            in_block_comment = 1
+            i += 2
+            continue
+
+        if content[i] == '"':
+            in_string = True
+            i += 1
+            continue
+
+        if content[i] == open_char:
+            depth += 1
+        elif content[i] == close_char:
+            depth -= 1
+        i += 1
+
+    return i
+
+
 def split_top_level(text, separator):
     parts = []
     start = 0
@@ -262,8 +320,12 @@ def extract_command_blocks(content):
         brief = brief_m.group(1) if brief_m else ""
         brief = re.sub(r"\\\n\s*", " ", brief).strip()
 
-        keys_m = re.search(r"keys:\s*vec!\[(.*?)\]", block, re.DOTALL)
-        keys_raw = keys_m.group(1).strip() if keys_m else ""
+        keys_raw = ""
+        keys_m = re.search(r"keys:\s*vec!\[", block)
+        if keys_m:
+            open_idx = keys_m.end() - 1
+            close_idx = find_matching_delim(block, open_idx, "[", "]") - 1
+            keys_raw = block[open_idx + 1 : close_idx].strip()
 
         keys_parsed = []
         if keys_raw:
@@ -391,16 +453,22 @@ def main():
     except subprocess.CalledProcessError:
         upstream_hash = None
 
-    # Parse fork
-    fork_src = git_show_first("HEAD", "wakterm-gui/src/commands.rs", "wezterm-gui/src/commands.rs")
+    # Parse fork from the working tree so the generated file reflects
+    # the edits that are about to be committed, not the previous HEAD.
+    fork_src = None
+    for path in ("wakterm-gui/src/commands.rs", "wezterm-gui/src/commands.rs"):
+        try:
+            with open(path) as f:
+                fork_src = f.read()
+                break
+        except FileNotFoundError:
+            continue
     if not fork_src:
-        for path in ("wakterm-gui/src/commands.rs", "wezterm-gui/src/commands.rs"):
-            try:
-                with open(path) as f:
-                    fork_src = f.read()
-                    break
-            except FileNotFoundError:
-                continue
+        fork_src = git_show_first(
+            "HEAD",
+            "wakterm-gui/src/commands.rs",
+            "wezterm-gui/src/commands.rs",
+        )
     fork_blocks = extract_command_blocks(fork_src)
 
     # Parse upstream

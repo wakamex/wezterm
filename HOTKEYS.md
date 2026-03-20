@@ -15,6 +15,7 @@ Upstream: `upstream/main` (05343b387)
 | `ActivatePaneDirection(Right)` | Activate Pane Right | Ctrl+Shift+RightArrow | Ctrl+Shift+RightArrow | same |
 | `ActivatePaneDirection(Up)` | Activate Pane Up | Ctrl+Shift+UpArrow | Ctrl+Shift+UpArrow | same |
 | `ActivateTab(-1)` | Activate right-most tab | Ctrl+Shift+9 | Cmd+9 | same |
+| `ActivateTabRelative(1)` | Activate the tab to the right | Ctrl+Shift+], Ctrl+Tab, Ctrl+PageDown | Shift+Cmd+], Ctrl+Tab, Ctrl+PageDown | same |
 | `CharSelect(_)` | Enter Emoji / Character selection mode | Ctrl+Shift+u | Ctrl+Shift+u | same |
 | `ClearScrollback(ScrollbackOnly)` | Clear scrollback | Ctrl+Shift+k | Cmd+k | same |
 | `CloseCurrentPane(confirm=true)` | Close current Pane | Ctrl+Shift+d | Cmd+d | **changed** |
@@ -26,8 +27,8 @@ Upstream: `upstream/main` (05343b387)
 | `Hide` | Hide/Minimize Window | Ctrl+Shift+m | Cmd+m | same |
 | `HideApplication` | Hide Application | Ctrl+Shift+h | Cmd+h | same |
 | `IncreaseFontSize` | Increase font size | Ctrl+Shift+=, Ctrl+= | Cmd+=, Ctrl+= | same |
-| `MoveTabRelative(-1)` | Move tab one place to the left | Ctrl+Shift+PageUp | Ctrl+Shift+PageUp | same |
-| `MoveTabRelative(1)` | Move tab one place to the right | Ctrl+Shift+PageDown | Ctrl+Shift+PageDown | same |
+| `MoveTabRelative(-1)` | Move tab one place to the left | Ctrl+Shift+PageUp, Ctrl+Shift+Alt+[ | Ctrl+Shift+PageUp, Opt+Cmd+[ | **changed** |
+| `MoveTabRelative(1)` | Move tab one place to the right | Ctrl+Shift+PageDown, Ctrl+Shift+Alt+] | Ctrl+Shift+PageDown, Opt+Cmd+] | **changed** |
 | `PasteFrom(Clipboard)` | Paste from clipboard | Ctrl+Shift+v, Paste | Cmd+v, Paste | same |
 | `PasteFrom(PrimarySelection)` | Paste primary selection | Shift+Insert | Shift+Insert | same |
 | `PromptRenameTab` | Rename current tab | Ctrl+Shift+< | Cmd+< | **fork only** |
@@ -51,7 +52,6 @@ Upstream: `upstream/main` (05343b387)
 |--------|-------------|----------|
 | `ActivateLastTab` | Activate the last active tab | same |
 | `ActivateTab(n)` | Activate Tab(n) | same |
-| `ActivateTabRelative(1)` | Activate the tab to the right | same |
 | `ActivateTabRelative(n)` | Activate Tab Relative(n) | same |
 | `ActivateTabRelativeNoWrap(1)` | Activate the tab to the right (no wrapping) | same |
 | `ActivateTabRelativeNoWrap(n)` | Activate Tab Relative No Wrap(n) | same |
@@ -139,4 +139,4 @@ Upstream: `upstream/main` (05343b387)
 - `ScrollToPrompt`
 - `ShowLauncherArgs`
 
-*36 bound, 74 unbound with description, 12 raw.*
+*37 bound, 73 unbound with description, 12 raw.*

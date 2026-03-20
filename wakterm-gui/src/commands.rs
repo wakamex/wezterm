@@ -1292,7 +1292,10 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             doc: "Rearranges the tabs so that the current tab moves \
             one place to the left"
                 .into(),
-            keys: vec![(Modifiers::CTRL.union(Modifiers::SHIFT), "PageUp".into())],
+            keys: vec![
+                (Modifiers::CTRL.union(Modifiers::SHIFT), "PageUp".into()),
+                (Modifiers::SUPER.union(Modifiers::ALT), "[".into()),
+            ],
             args: &[ArgType::ActiveTab],
             menubar: &["Window", "Move Tab"],
             icon: Some("fa_long_arrow_left"),
@@ -1302,7 +1305,10 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             doc: "Rearranges the tabs so that the current tab moves \
             one place to the right"
                 .into(),
-            keys: vec![(Modifiers::CTRL.union(Modifiers::SHIFT), "PageDown".into())],
+            keys: vec![
+                (Modifiers::CTRL.union(Modifiers::SHIFT), "PageDown".into()),
+                (Modifiers::SUPER.union(Modifiers::ALT), "]".into()),
+            ],
             args: &[ArgType::ActiveTab],
             menubar: &["Window", "Move Tab"],
             icon: Some("fa_long_arrow_right"),
