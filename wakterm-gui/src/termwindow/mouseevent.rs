@@ -688,8 +688,10 @@ impl super::TermWindow {
                         WMEK::Move => {
                             if self.config.pane_focus_follows_mouse {
                                 let mux = Mux::get();
-                                mux.get_active_tab_for_window_for_current_identity(self.mux_window_id)
-                                    .map(|tab| tab.set_active_idx(pos.index));
+                                mux.get_active_tab_for_window_for_current_identity(
+                                    self.mux_window_id,
+                                )
+                                .map(|tab| tab.set_active_idx(pos.index));
 
                                 pane = Arc::clone(&pos.pane);
                                 context.invalidate();

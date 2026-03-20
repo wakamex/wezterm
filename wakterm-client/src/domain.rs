@@ -4,10 +4,10 @@ use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use codec::{ListPanesResponse, SpawnV2, SplitPane};
 use config::keyassignment::SpawnTabDomain;
-use config::{SshDomain, TlsDomainClient, UnixDomain, configuration};
+use config::{configuration, SshDomain, TlsDomainClient, UnixDomain};
 use mux::agent::AgentTabBadgeState;
 use mux::connui::{ConnectionUI, ConnectionUIParams};
-use mux::domain::{Domain, DomainId, DomainState, SplitSource, alloc_domain_id};
+use mux::domain::{alloc_domain_id, Domain, DomainId, DomainState, SplitSource};
 use mux::pane::{Pane, PaneId};
 use mux::tab::{SplitRequest, Tab, TabId};
 use mux::window::WindowId;
@@ -1162,14 +1162,13 @@ impl Domain for ClientDomain {
 #[cfg(test)]
 mod test {
     use super::*;
-    use mux::Mux;
     use mux::client::{ClientId, ClientTabViewState, ClientViewId, ClientWindowViewState};
     use mux::renderable::StableCursorPosition;
     use mux::tab::{PaneEntry, PaneNode, SerdeUrl};
     use mux::window::WindowId;
+    use mux::Mux;
     use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::Once;
+    use std::sync::{Arc, Once};
     use termwiz::surface::{CursorShape, CursorVisibility};
     use wakterm_term::TerminalSize;
 

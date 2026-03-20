@@ -7,11 +7,11 @@ use smithay_client_toolkit::reexports::csd_frame::{DecorationsFrame, FrameClick}
 use smithay_client_toolkit::seat::pointer::{
     PointerData, PointerDataExt, PointerEvent, PointerEventKind, PointerHandler,
 };
+use wakterm_input_types::MousePress;
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_pointer::{ButtonState, WlPointer};
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, Proxy, QueueHandle};
-use wakterm_input_types::MousePress;
 
 use crate::wayland::SurfaceUserData;
 

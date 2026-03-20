@@ -4,8 +4,8 @@ use async_ossl::AsyncSslStream;
 use codec::{DecodedPdu, Pdu};
 use futures::FutureExt;
 use mux::{Mux, MuxNotification};
-use smol::Async;
 use smol::prelude::*;
+use smol::Async;
 use wakterm_uds::UnixStream;
 
 #[cfg(unix)]

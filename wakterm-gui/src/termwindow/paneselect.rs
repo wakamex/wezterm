@@ -163,10 +163,11 @@ impl PaneSelector {
         term_window: &mut TermWindow,
     ) -> anyhow::Result<()> {
         let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window_for_current_identity(term_window.mux_window_id) {
-            Some(tab) => tab,
-            None => return Ok(()),
-        };
+        let tab =
+            match mux.get_active_tab_for_window_for_current_identity(term_window.mux_window_id) {
+                Some(tab) => tab,
+                None => return Ok(()),
+            };
 
         let tab_id = tab.tab_id();
 

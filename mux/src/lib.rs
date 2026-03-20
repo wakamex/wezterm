@@ -1,20 +1,21 @@
 use crate::agent::{
-    AgentMetadata, AgentRuntimeSnapshot, AgentSnapshot, AgentTabBadgeState, derive_runtime_status,
-    infer_harness, prime_runtime_for_new_agent, refresh_runtime_from_harness,
+    derive_runtime_status, infer_harness, prime_runtime_for_new_agent,
+    refresh_runtime_from_harness, AgentMetadata, AgentRuntimeSnapshot, AgentSnapshot,
+    AgentTabBadgeState,
 };
 use crate::client::{ClientId, ClientInfo, ClientViewId, ClientViewState, ClientWindowViewState};
 use crate::pane::{CachePolicy, Pane, PaneId};
 use crate::ssh_agent::AgentProxy;
 use crate::tab::{NotifyMux, SplitRequest, Tab, TabId};
 use crate::window::{Window, WindowId};
-use anyhow::{Context, Error, anyhow};
+use anyhow::{anyhow, Context, Error};
 use chrono::{DateTime, Utc};
 use config::keyassignment::SpawnTabDomain;
-use config::{ExitBehavior, GuiPosition, configuration};
+use config::{configuration, ExitBehavior, GuiPosition};
 use domain::{Domain, DomainId, DomainState, SplitSource};
-use filedescriptor::{AsRawSocketDescriptor, FileDescriptor, POLLIN, poll, pollfd, socketpair};
+use filedescriptor::{poll, pollfd, socketpair, AsRawSocketDescriptor, FileDescriptor, POLLIN};
 #[cfg(unix)]
-use libc::{SO_RCVBUF, SO_SNDBUF, SOL_SOCKET, c_int};
+use libc::{c_int, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
 use log::error;
 use metrics::histogram;
 use parking_lot::{
@@ -36,7 +37,7 @@ use termwiz::escape::{Action, CSI};
 use thiserror::*;
 use wakterm_term::{Clipboard, ClipboardSelection, DownloadHandler, TerminalSize};
 #[cfg(windows)]
-use winapi::um::winsock2::{SO_RCVBUF, SO_SNDBUF, SOL_SOCKET};
+use winapi::um::winsock2::{SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
 
 pub mod activity;
 pub mod agent;
@@ -808,7 +809,11 @@ impl Mux {
 
     fn agent_tab_badge_text() -> Option<String> {
         let badge = configuration().agent_tab_badge.clone();
-        if badge.is_empty() { None } else { Some(badge) }
+        if badge.is_empty() {
+            None
+        } else {
+            Some(badge)
+        }
     }
 
     pub fn sanitize_tab_title_text(title: &str) -> String {
@@ -2413,8 +2418,8 @@ mod test {
     use super::*;
     use crate::agent::AgentMetadata;
     use crate::client::{ClientId, ClientViewId};
-    use crate::domain::{Domain, DomainId, DomainState, alloc_domain_id};
-    use crate::pane::{CachePolicy, ForEachPaneLogicalLine, Pane, WithPaneLines, alloc_pane_id};
+    use crate::domain::{alloc_domain_id, Domain, DomainId, DomainState};
+    use crate::pane::{alloc_pane_id, CachePolicy, ForEachPaneLogicalLine, Pane, WithPaneLines};
     use crate::renderable::{RenderableDimensions, StableCursorPosition};
     use anyhow::Error;
     use async_trait::async_trait;

@@ -3683,7 +3683,7 @@ impl Drop for TermWindow {
 
 #[cfg(test)]
 mod test {
-    use super::{PaneInformation, Progress, TabInformation, prompt_rename_tab_initial_value};
+    use super::{prompt_rename_tab_initial_value, PaneInformation, Progress, TabInformation};
     use std::collections::HashMap;
 
     fn pane_with_title(title: &str) -> PaneInformation {

@@ -2,14 +2,13 @@
 
 use serde::Deserialize;
 use serde_json::Value;
-use std::env;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{env, thread};
 
 #[derive(Debug, Clone, Deserialize)]
 struct AgentWatchEvent {

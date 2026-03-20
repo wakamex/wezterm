@@ -526,8 +526,8 @@ impl Window {
             // Let Cocoa remember the window position and size across restarts.
             // setFrameAutosaveName makes NSWindow automatically save/restore
             // the frame to NSUserDefaults — the standard macOS mechanism.
-            let autosave_name = cocoa::foundation::NSString::alloc(nil)
-                .init_str("WakTermMainWindow");
+            let autosave_name =
+                cocoa::foundation::NSString::alloc(nil).init_str("WakTermMainWindow");
             let _: () = msg_send![*window, setFrameAutosaveName: autosave_name];
 
             window.setReleasedWhenClosed_(NO);

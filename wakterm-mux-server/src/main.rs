@@ -243,26 +243,20 @@ fn run() -> anyhow::Result<()> {
     // Set up signal handler to save session before exit
     #[cfg(unix)]
     {
-        let _ = signal_hook::flag::register(
-            signal_hook::consts::SIGTERM,
-            Arc::clone(&SHUTDOWN_FLAG),
-        );
-        let _ = signal_hook::flag::register(
-            signal_hook::consts::SIGINT,
-            Arc::clone(&SHUTDOWN_FLAG),
-        );
+        let _ =
+            signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&SHUTDOWN_FLAG));
+        let _ =
+            signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&SHUTDOWN_FLAG));
     }
 
     // Periodic session auto-save (every 60 seconds)
-    thread::spawn(|| {
-        loop {
-            thread::sleep(std::time::Duration::from_secs(60));
-            if SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
-            }
-            if let Err(err) = mux::session_persistence::save_session() {
-                log::debug!("auto-save session: {:#}", err);
-            }
+    thread::spawn(|| loop {
+        thread::sleep(std::time::Duration::from_secs(60));
+        if SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        if let Err(err) = mux::session_persistence::save_session() {
+            log::debug!("auto-save session: {:#}", err);
         }
     });
 

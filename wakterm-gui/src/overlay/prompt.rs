@@ -1,7 +1,8 @@
 use crate::scripting::guiwin::GuiWin;
 use config::keyassignment::{KeyAssignment, PromptInputLine};
-use mux::{tab::TabId, Mux};
+use mux::tab::TabId;
 use mux::termwiztermtab::TermWizTerminal;
+use mux::Mux;
 use mux_lua::MuxPane;
 use std::rc::Rc;
 use termwiz::input::{InputEvent, KeyCode, KeyEvent};

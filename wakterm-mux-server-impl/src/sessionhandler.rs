@@ -1,5 +1,5 @@
 use crate::PKI;
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use codec::*;
 use config::TermConfig;
 use mux::client::ClientId;
@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use termwiz::surface::SequenceNo;
 use url::Url;
-use wakterm_term::StableRowIndex;
 use wakterm_term::terminal::Alert;
+use wakterm_term::StableRowIndex;
 
 #[derive(Clone)]
 pub struct PduSender {
@@ -1328,8 +1328,7 @@ mod test {
     use chrono::{TimeZone, Utc};
     use mux::agent::AgentMetadata;
     use mux::client::{ClientTabViewState, ClientViewId};
-    use mux::pane::LogicalLine;
-    use mux::pane::{CachePolicy, Pane, alloc_pane_id};
+    use mux::pane::{alloc_pane_id, CachePolicy, LogicalLine, Pane};
     use mux::renderable::RenderableDimensions;
     use mux::tab::{SplitDirection, SplitRequest, SplitSize, Tab};
     use mux::window::WindowId;
@@ -1879,12 +1878,10 @@ mod test {
         }
 
         assert!(response.tab_titles.iter().any(|title| title == "scrape"));
-        assert!(
-            response
-                .tab_badges
-                .iter()
-                .any(|badge| badge.waiting_on_user && badge.needs_attention)
-        );
+        assert!(response
+            .tab_badges
+            .iter()
+            .any(|badge| badge.waiting_on_user && badge.needs_attention));
     }
 
     #[test]

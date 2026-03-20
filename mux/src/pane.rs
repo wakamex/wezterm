@@ -243,12 +243,7 @@ pub trait Pane: Downcast + Send + Sync {
     /// Send a batched resize with all sibling pane sizes for the
     /// containing tab. Default is no-op (local panes don't need this).
     /// ClientPane overrides to send a ResizeTab PDU.
-    fn send_resize_batch(
-        &self,
-        _tab_id: TabId,
-        _pane_sizes: Vec<(PaneId, TerminalSize)>,
-    ) {
-    }
+    fn send_resize_batch(&self, _tab_id: TabId, _pane_sizes: Vec<(PaneId, TerminalSize)>) {}
     /// Notify the server that panes in the tab were rotated.
     /// Default is no-op (local panes don't need this).
     fn send_rotate_panes(&self, _tab_id: TabId, _clockwise: bool) {}

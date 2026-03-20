@@ -35,6 +35,11 @@ use smithay_client_toolkit::shell::xdg::window::{
 };
 use smithay_client_toolkit::shell::xdg::XdgSurface;
 use smithay_client_toolkit::shell::WaylandSurface;
+use wakterm_font::FontConfiguration;
+use wakterm_input_types::{
+    KeyboardLedStatus, Modifiers, MouseButtons, MouseEvent, MouseEventKind, MousePress,
+    ScreenPoint, WindowDecorations,
+};
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_keyboard::{Event as WlKeyboardEvent, KeyState};
 use wayland_client::protocol::wl_pointer::{ButtonState, WlPointer};
@@ -44,11 +49,6 @@ use wayland_client::{Connection as WConnection, Dispatch, Proxy, QueueHandle};
 use wayland_egl::{is_available as egl_is_available, WlEglSurface};
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur::OrgKdeKwinBlur;
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur_manager::OrgKdeKwinBlurManager;
-use wakterm_font::FontConfiguration;
-use wakterm_input_types::{
-    KeyboardLedStatus, Modifiers, MouseButtons, MouseEvent, MouseEventKind, MousePress,
-    ScreenPoint, WindowDecorations,
-};
 
 use crate::wayland::WaylandConnection;
 use crate::x11::KeyboardWithFallback;

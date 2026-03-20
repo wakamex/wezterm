@@ -37,7 +37,10 @@ impl SshMultiplexing {
 }
 
 impl FromDynamic for SshMultiplexing {
-    fn from_dynamic(value: &Value, _options: FromDynamicOptions) -> Result<Self, wakterm_dynamic::Error> {
+    fn from_dynamic(
+        value: &Value,
+        _options: FromDynamicOptions,
+    ) -> Result<Self, wakterm_dynamic::Error> {
         match value {
             Value::String(s) => match s.as_str() {
                 "wakterm" | "WakTerm" | "wezterm" | "WezTerm" => Ok(Self::Wakterm),
