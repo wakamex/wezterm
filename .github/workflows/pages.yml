@@ -57,8 +57,10 @@ jobs:
       - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: "7c48ce23cb4423feb34a7fe3921e307f"
         run: |
           npx wrangler@4.69.0 pages deploy gh_pages \
+            --project-name wakterm \
             --branch main \
             --commit-hash "${GITHUB_SHA}" \
             --commit-message "${{ github.event.head_commit.message || github.sha }}"
