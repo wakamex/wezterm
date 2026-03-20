@@ -1,6 +1,6 @@
 # wakterm (wakamex fork)
 
-This is an actively maintained fork of [wezterm/wezterm](https://github.com/wezterm/wezterm). Upstream development has slowed, and this fork fixes bugs that affect daily mux server usage. I also took the opportunity to make agent harnesses first-class citizens 🤖.
+This is an actively maintained fork of [wezterm/wezterm](https://github.com/wezterm/wezterm), extending it with fixes and features for daily mux server usage. I also took the opportunity to make agent harnesses first-class citizens 🤖.
 
 ### What's changed
 

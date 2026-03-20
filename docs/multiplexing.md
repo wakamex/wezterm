@@ -1,8 +1,3 @@
-!!! note
-    wakterm puts extra emphasis on multiplexer reliability and persistence.
-    Layout save and restore, multi-client stability, and agent harness panes
-    all build on the same mux foundation described here.
-
 ## Multiplexing
 
 Multiplexing is the part of wakterm that lets panes, tabs, and windows live in

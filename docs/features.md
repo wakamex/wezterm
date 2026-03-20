@@ -3,12 +3,10 @@ hide:
   - toc
 ---
 
-## Features
+## wakterm Focus
 
 wakterm keeps the core WezTerm feature set, with extra focus on mux
 reliability, persistent layouts, and agent-driven workflows.
-
-## Fork Highlights
 
 * Persistent layouts: auto-save and restore tabs, split trees, working
   directories, titles, and active-tab selection across mux server restarts

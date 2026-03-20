@@ -4,7 +4,7 @@
 
 #define MyAppName "wakterm"
 ;#define MyAppVersion "1.5"
-#define MyAppPublisher "Wez Furlong"
+#define MyAppPublisher "wakamex"
 #define MyAppURL "http://wakterm.org"
 #define MyAppExeName "wakterm-gui.exe"
 
