@@ -63,7 +63,7 @@
     </screenshot>
   </screenshots>
 
-  <developer_name>Wez Furlong</developer_name>
+  <developer_name>wakamex (fork of WezTerm by Wez Furlong)</developer_name>
 
   <releases>
     <release version="@TAG_NAME@" date="@DATE@">

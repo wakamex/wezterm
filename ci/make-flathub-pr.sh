@@ -18,8 +18,8 @@ RELEASE_DATE=$(git -c "core.abbrev=8" show -s "--format=%cd" "--date=format:%Y-%
 sed -e "s,@TAG_NAME@,$TAG_NAME,g" -e "s/@DATE@/$RELEASE_DATE/g" < assets/flatpak/org.wezfurlong.wakterm.appdata.template.xml > flathub/org.wezfurlong.wakterm.appdata.xml
 
 cd flathub
-git config user.email wez@wezfurlong.org
-git config user.name 'Wez Furlong'
+git config user.email wakamex@users.noreply.github.com
+git config user.name 'wakamex'
 git checkout -b "$TAG_NAME" origin/master
 git add --all
 git diff --cached

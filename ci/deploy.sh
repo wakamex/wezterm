@@ -188,7 +188,7 @@ BUILDEOFEOF
 Name: wakterm
 Version: ${WAKTERM_RPM_VERSION}
 Release: ${SPEC_RELEASE}
-Packager: Wez Furlong <wez@wezfurlong.org>
+Packager: wakamex <wakamex@users.noreply.github.com>
 License: MIT
 URL: https://wakterm.org/
 Summary: wakterm.
@@ -274,7 +274,7 @@ install -Dm644 assets/wakterm-nautilus.py %{buildroot}/usr/share/nautilus-python
 /usr/bin/wakterm-mux-server
 
 %changelog
-* Mon Oct 2 2023 Wez Furlong
+* Mon Oct 2 2023 wakamex
 - See git for full changelog
 EOF
 
@@ -303,7 +303,7 @@ Package: $pkgname
 Version: ${TAG_NAME#nightly-}
 Conflicts: $conflicts
 Architecture: $(dpkg-architecture -q DEB_BUILD_ARCH_CPU)
-Maintainer: Wez Furlong <wez@wezfurlong.org>
+Maintainer: wakamex <wakamex@users.noreply.github.com>
 Section: utils
 Priority: optional
 Homepage: https://wakterm.org/
@@ -388,7 +388,7 @@ EOF
         abuild-keygen -a -n -b 8192
         pkgver="${TAG_NAME#nightly-}"
         cat > APKBUILD <<EOF
-# Maintainer: Wez Furlong <wez@wezfurlong.org>
+# Maintainer: wakamex <wakamex@users.noreply.github.com>
 pkgname=wakterm
 pkgver=$(echo "$pkgver" | cut -d'-' -f1-2 | tr - .)
 _pkgver=$pkgver

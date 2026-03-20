@@ -2,7 +2,7 @@
 # updated from:
 # https://github.com/wakamex/wakterm/blob/main/ci/wakterm-linuxbrew.rb.template
 # by automation in the wakterm repo.
-class Wezterm < Formula
+class Wakterm < Formula
   desc "A GPU-accelerated cross-platform terminal emulator and multiplexer written by @wez and implemented in Rust"
   homepage "https://wakterm.org/"
   url "https://github.com/wakamex/wakterm/releases/download/@TAG@/wakterm-@TAG@-Ubuntu20.04.AppImage"
