@@ -94,8 +94,12 @@ def load_release_info():
     with open("/tmp/wakterm.releases.json") as f:
         release_info = json.load(f)
 
-    with open("/tmp/wakterm.nightly.json") as f:
-        nightly = json.load(f)
+    nightly_path = pathlib.Path("/tmp/wakterm.nightly.json")
+    if nightly_path.exists():
+        with nightly_path.open() as f:
+            nightly = json.load(f)
+    else:
+        nightly = None
 
     latest = pick_latest_stable_release(release_info if isinstance(release_info, list) else [])
     nightly = nightly if isinstance(nightly, dict) and "tag_name" in nightly and "assets" in nightly else None

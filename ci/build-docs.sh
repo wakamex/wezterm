@@ -34,7 +34,6 @@ function ghapi() {
 }
 
 [[ -f /tmp/wakterm.releases.json ]] || ghapi /repos/wakamex/wakterm/releases > /tmp/wakterm.releases.json
-[[ -f /tmp/wakterm.nightly.json ]] || ghapi /repos/wakamex/wakterm/releases/tags/nightly > /tmp/wakterm.nightly.json
 python3 ci/subst-release-info.py || exit 1
 python3 ci/generate-docs.py || exit 1
 
