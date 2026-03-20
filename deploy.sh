@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
 DEST="$HOME/wakterm-test"
-SRC="/code/wakterm/target/release"
+TARGET_ROOT="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+SRC="$TARGET_ROOT/release"
 
 usage() {
     echo "Usage: ./deploy.sh [--restart] [--no-save] [--wipe-session] [--clean]"
@@ -14,7 +17,7 @@ usage() {
     echo "  --clean     Run cargo clean for deployed crates before building"
     echo ""
     echo "After --restart, reconnect from Mac then run:"
-    echo "  cd /code/wakterm && target/release/wakterm cli restore-layout"
+    echo "  cd $REPO_ROOT && target/release/wakterm cli restore-layout"
     echo ""
     echo "To install the deployed binaries into ~/.local/bin:"
     echo "  ./install.sh"
@@ -95,7 +98,7 @@ echo ""
 
 if $SAVE_SESSION; then
     echo "=== Step 2: Save manual layout snapshot ==="
-    cd /code/wakterm
+    cd "$REPO_ROOT"
     "$SRC/wakterm" cli save-layout
     echo ""
 else
@@ -146,7 +149,7 @@ if $RESTART; then
             echo ""
             if $WIPE_SESSION; then
                 echo "To restore tabs manually afterward:"
-                echo "  cd /code/wakterm && target/release/wakterm cli restore-layout"
+                echo "  cd $REPO_ROOT && target/release/wakterm cli restore-layout"
             fi
         else
             echo "  No running mux server found"
