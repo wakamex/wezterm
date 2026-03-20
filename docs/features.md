@@ -27,7 +27,7 @@ reliability, persistent layouts, and agent-driven workflows.
 
 ## Core Terminal Features
 
-* Runs on Linux, macOS, Windows 10, FreeBSD and NetBSD
+* Runs on Linux, macOS, and Windows
 * [Multiplex terminal panes, tabs and windows on local and remote hosts, with native mouse and scrollback](multiplexing.md)
 * Tabs, panes, and multiple windows, with native keyboard-driven navigation
 * [SSH client with native tabs](ssh.md)
