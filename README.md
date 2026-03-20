@@ -25,7 +25,7 @@ See [CHANGELOG-FORK.md](CHANGELOG-FORK.md) for the detailed fork fix history.
 - Multi-client sessions are much less prone to flickering, jumpy redraws, and resize feedback loops
 - User-set titles (via Ctrl+Shift+<) are no longer overwritten by terminal escape sequences
 
-**5 new default key bindings:**
+**6 new default key bindings:**
 
 | Key | Action |
 |-----|--------|
@@ -34,6 +34,7 @@ See [CHANGELOG-FORK.md](CHANGELOG-FORK.md) for the detailed fork fix history.
 | Shift+End | Scroll to bottom |
 | Ctrl+Shift+O (Cmd+O) | Rotate panes clockwise |
 | Ctrl+Shift+E (Cmd+E) | Tab navigator |
+| Ctrl+Shift+< (Cmd+<) | Rename current tab |
 
 Full hotkey reference: [HOTKEYS.md](HOTKEYS.md)
 

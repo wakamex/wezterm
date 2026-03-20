@@ -71,8 +71,8 @@ in a form that you can copy and paste into your own configuration.
 | `CTRL+SHIFT`     | `K`    | `ClearScrollback="ScrollbackOnly"` |
 | `CTRL+SHIFT`     | `L`    | `ShowDebugOverlay` {{since('20210814-124438-54e29167', inline=True)}}|
 | `CTRL+SHIFT`     | `P`    | `ActivateCommandPalette` {{since('20230320-124340-559cb7b0', inline=True)}}|
-| `SUPER`          | `e`    | `PromptRenameTab` {{since('nightly', inline=True)}}|
-| `CTRL+SHIFT`     | `E`    | `PromptRenameTab` {{since('nightly', inline=True)}}|
+| `SUPER`          | `<`    | `PromptRenameTab` {{since('nightly', inline=True)}}|
+| `CTRL+SHIFT`     | `<`    | `PromptRenameTab` {{since('nightly', inline=True)}}|
 | `CTRL+SHIFT`     | `U`    | `CharSelect` {{since('20220903-194523-3bb1ed61', inline=True)}}|
 | `SUPER`          | `f`    | `Search={CaseSensitiveString=""}` |
 | `CTRL+SHIFT`     | `F`    | `Search={CaseSensitiveString=""}` |
