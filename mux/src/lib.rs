@@ -1,7 +1,8 @@
 use crate::agent::{
-    derive_runtime_status, infer_harness, prime_runtime_for_new_agent,
-    refresh_runtime_from_harness, AgentMetadata, AgentRuntimeSnapshot, AgentSnapshot,
-    AgentTabBadgeState,
+    default_launch_cmd_for_harness, derive_runtime_status, detect_harness_process, infer_harness,
+    prime_runtime_for_new_agent, refresh_runtime_from_harness, finalize_runtime_snapshot,
+    AgentMetadata, AgentOrigin,
+    AgentRuntimeSnapshot, AgentSnapshot, AgentTabBadgeState,
 };
 use crate::client::{ClientId, ClientInfo, ClientViewId, ClientViewState, ClientWindowViewState};
 use crate::pane::{CachePolicy, Pane, PaneId};
@@ -35,6 +36,7 @@ use std::time::{Duration, Instant};
 use termwiz::escape::csi::{DecPrivateMode, DecPrivateModeCode, Device, Mode};
 use termwiz::escape::{Action, CSI};
 use thiserror::*;
+use url::Url;
 use wakterm_term::{Clipboard, ClipboardSelection, DownloadHandler, TerminalSize};
 #[cfg(windows)]
 use winapi::um::winsock2::{SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
@@ -129,12 +131,38 @@ pub struct Mux {
 }
 
 const BUFSIZE: usize = 1024 * 1024;
+const AGENT_HARNESS_REFRESH_THROTTLE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentTabBadgeMode {
     Attention,
     Turn,
     Off,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentRefreshPolicy {
+    Immediate,
+    Throttled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentTitleFingerprint {
+    turn_state: crate::agent::AgentTurnState,
+    last_turn_completed_at: Option<DateTime<Utc>>,
+    attention_reason: Option<String>,
+}
+
+struct DetectedAgentState {
+    pane_id: PaneId,
+    tab_id: TabId,
+    window_id: WindowId,
+    workspace: String,
+    domain_id: DomainId,
+    launch_cmd: String,
+    declared_cwd: String,
+    runtime: AgentRuntimeSnapshot,
+    detection_source: String,
 }
 
 /// This function applies parsed actions to the pane and notifies any
@@ -642,20 +670,308 @@ impl Mux {
         self.agent_metadata_by_pane.read().get(&pane_id).cloned()
     }
 
+    fn agent_auto_adopt_on_confirmed_session_match() -> bool {
+        configuration().agent_auto_adopt_on_confirmed_session_match
+    }
+
+    fn harness_slug(harness: &crate::agent::AgentHarness) -> &'static str {
+        match harness {
+            crate::agent::AgentHarness::Claude => "claude",
+            crate::agent::AgentHarness::Codex => "codex",
+            crate::agent::AgentHarness::Gemini => "gemini",
+            crate::agent::AgentHarness::Opencode => "opencode",
+            crate::agent::AgentHarness::Unknown => "agent",
+        }
+    }
+
+    fn slugify_agent_name_piece(value: &str) -> String {
+        let mut slug = String::new();
+        let mut last_was_underscore = false;
+        for ch in value.chars() {
+            let lower = ch.to_ascii_lowercase();
+            if lower.is_ascii_alphanumeric() {
+                slug.push(lower);
+                last_was_underscore = false;
+            } else if !last_was_underscore {
+                slug.push('_');
+                last_was_underscore = true;
+            }
+        }
+        slug.trim_matches('_').to_string()
+    }
+
+    fn cwd_leaf_for_agent_name(declared_cwd: &str) -> Option<String> {
+        let normalized = if declared_cwd.starts_with("file://") {
+            Url::parse(declared_cwd)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| declared_cwd.to_string())
+        } else {
+            declared_cwd.to_string()
+        };
+        std::path::Path::new(&normalized)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(Self::slugify_agent_name_piece)
+            .filter(|leaf| !leaf.is_empty())
+    }
+
+    fn detected_agent_name_base(
+        harness: &crate::agent::AgentHarness,
+        declared_cwd: &str,
+    ) -> String {
+        let harness = Self::harness_slug(harness);
+        match Self::cwd_leaf_for_agent_name(declared_cwd) {
+            Some(leaf) if leaf != harness => format!("{leaf}_{harness}"),
+            _ => harness.to_string(),
+        }
+    }
+
+    fn next_available_agent_name(taken_names: &HashSet<String>, base_name: &str) -> String {
+        if !taken_names.contains(base_name) {
+            return base_name.to_string();
+        }
+
+        for suffix in 2usize.. {
+            let candidate = format!("{base_name}{suffix}");
+            if !taken_names.contains(&candidate) {
+                return candidate;
+            }
+        }
+
+        unreachable!("unbounded numeric suffix loop should always find a free agent name")
+    }
+
+    fn detected_agent_created_at(runtime: &AgentRuntimeSnapshot) -> DateTime<Utc> {
+        runtime
+            .last_progress_at
+            .or(runtime.last_turn_completed_at)
+            .unwrap_or(runtime.observed_at)
+    }
+
+    fn pane_declared_cwd(
+        pane: &Arc<dyn Pane>,
+        process_info: Option<&procinfo::LocalProcessInfo>,
+    ) -> Option<String> {
+        if let Some(url) = pane.get_current_working_dir(CachePolicy::AllowStale) {
+            if url.scheme() == "file" {
+                return url
+                    .to_file_path()
+                    .ok()
+                    .map(|path| path.to_string_lossy().to_string());
+            }
+            return Some(url.to_string());
+        }
+
+        process_info.and_then(|process| {
+            if process.cwd.as_os_str().is_empty() {
+                None
+            } else {
+                Some(process.cwd.to_string_lossy().to_string())
+            }
+        })
+    }
+
+    fn detect_agent_state_for_pane(&self, pane_id: PaneId) -> Option<DetectedAgentState> {
+        if self.get_agent_metadata_for_pane(pane_id).is_some() {
+            return None;
+        }
+
+        let pane = self.get_pane(pane_id)?;
+        let (_domain_id, window_id, tab_id) = self.resolve_pane_id(pane_id)?;
+        let window = self.get_window(window_id)?;
+        let foreground_process_name = pane.get_foreground_process_name(CachePolicy::AllowStale);
+        let foreground_process_info = pane.get_foreground_process_info(CachePolicy::AllowStale);
+        let declared_cwd = Self::pane_declared_cwd(&pane, foreground_process_info.as_ref())?;
+        let process_match = detect_harness_process(
+            foreground_process_info.as_ref(),
+            foreground_process_name.as_deref(),
+        );
+        let process_harness = process_match
+            .as_ref()
+            .map(|matched| matched.harness.clone())
+            .unwrap_or(crate::agent::AgentHarness::Unknown);
+        let title = pane.get_title();
+        let title_harness = infer_harness(&title, None);
+        let harness = if !matches!(process_harness, crate::agent::AgentHarness::Unknown) {
+            process_harness.clone()
+        } else {
+            title_harness.clone()
+        };
+        if matches!(harness, crate::agent::AgentHarness::Unknown) {
+            return None;
+        }
+
+        let launch_cmd = process_match
+            .as_ref()
+            .map(|matched| matched.launch_cmd.clone())
+            .or_else(|| default_launch_cmd_for_harness(&harness).map(str::to_string))?;
+        let metadata = AgentMetadata {
+            agent_id: format!("detected-pane-{pane_id}"),
+            name: format!("detected-{pane_id}"),
+            launch_cmd,
+            declared_cwd,
+            created_at: Utc::now(),
+            repo_root: None,
+            worktree: None,
+            branch: None,
+            managed_checkout: false,
+        };
+        let mut runtime = AgentRuntimeSnapshot::new(&metadata);
+        runtime.alive = !pane.is_dead();
+        runtime.foreground_process_name = foreground_process_name;
+        runtime.tty_name = pane.tty_name();
+        runtime.terminal_progress = pane.get_progress();
+        refresh_runtime_from_harness(&mut runtime, &metadata);
+        runtime.status = derive_runtime_status(&runtime);
+
+        let mut source = vec![];
+        if !matches!(process_harness, crate::agent::AgentHarness::Unknown) {
+            source.push("proc");
+        }
+        if runtime.session_path.is_some() {
+            source.push("session");
+        }
+        if !matches!(title_harness, crate::agent::AgentHarness::Unknown) {
+            source.push("title");
+        }
+        if source.is_empty()
+            || (matches!(process_harness, crate::agent::AgentHarness::Unknown)
+                && matches!(title_harness, crate::agent::AgentHarness::Unknown))
+        {
+            return None;
+        }
+
+        Some(DetectedAgentState {
+            pane_id,
+            tab_id,
+            window_id,
+            workspace: window.get_workspace().to_string(),
+            domain_id: pane.domain_id(),
+            launch_cmd: metadata.launch_cmd,
+            declared_cwd: metadata.declared_cwd,
+            runtime,
+            detection_source: source.join("+"),
+        })
+    }
+
+    fn detected_agent_snapshot_from_state(
+        state: DetectedAgentState,
+        name: String,
+    ) -> AgentSnapshot {
+        let created_at = Self::detected_agent_created_at(&state.runtime);
+        AgentSnapshot {
+            metadata: AgentMetadata {
+                agent_id: format!("detected-pane-{}", state.pane_id),
+                name,
+                launch_cmd: state.launch_cmd,
+                declared_cwd: state.declared_cwd,
+                created_at,
+                repo_root: None,
+                worktree: None,
+                branch: None,
+                managed_checkout: false,
+            },
+            runtime: state.runtime,
+            pane_id: state.pane_id,
+            tab_id: state.tab_id,
+            window_id: state.window_id,
+            workspace: state.workspace,
+            domain_id: state.domain_id,
+            origin: AgentOrigin::Detected,
+            detection_source: Some(state.detection_source),
+        }
+    }
+
+    fn maybe_auto_adopt_detected_agent(&self, pane_id: PaneId) {
+        if !Self::agent_auto_adopt_on_confirmed_session_match()
+            || self.get_agent_metadata_for_pane(pane_id).is_some()
+        {
+            return;
+        }
+
+        let Some(state) = self.detect_agent_state_for_pane(pane_id) else {
+            return;
+        };
+        if state.runtime.session_path.is_none() {
+            return;
+        }
+
+        let taken_names = self
+            .agent_panes_by_name
+            .read()
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let base_name = Self::detected_agent_name_base(&state.runtime.harness, &state.declared_cwd);
+        let name = Self::next_available_agent_name(&taken_names, &base_name);
+        let created_at = Self::detected_agent_created_at(&state.runtime);
+        let metadata = AgentMetadata {
+            agent_id: format!("detected-pane-{}", state.pane_id),
+            name,
+            launch_cmd: state.launch_cmd,
+            declared_cwd: state.declared_cwd,
+            created_at,
+            repo_root: None,
+            worktree: None,
+            branch: None,
+            managed_checkout: false,
+        };
+        let _ = self.set_agent_metadata(pane_id, metadata);
+    }
+
+    fn should_refresh_harness_runtime(
+        runtime: &AgentRuntimeSnapshot,
+        policy: AgentRefreshPolicy,
+        now: DateTime<Utc>,
+    ) -> bool {
+        match policy {
+            AgentRefreshPolicy::Immediate => true,
+            AgentRefreshPolicy::Throttled => runtime
+                .last_harness_refresh_at
+                .map(|last| {
+                    (now - last)
+                        .to_std()
+                        .map(|elapsed| elapsed >= AGENT_HARNESS_REFRESH_THROTTLE)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true),
+        }
+    }
+
+    fn title_fingerprint(runtime: &AgentRuntimeSnapshot) -> AgentTitleFingerprint {
+        AgentTitleFingerprint {
+            turn_state: runtime.turn_state.clone(),
+            last_turn_completed_at: runtime.last_turn_completed_at,
+            attention_reason: runtime.attention_reason.clone(),
+        }
+    }
+
     pub fn record_agent_input(&self, pane_id: PaneId) {
-        self.refresh_agent_runtime_for_pane_with_update(pane_id, true, |runtime| {
-            let now = chrono::Utc::now();
-            runtime.last_input_at = Some(now);
-            runtime.observed_at = now;
-        });
+        self.refresh_agent_runtime_for_pane_with_update(
+            pane_id,
+            true,
+            AgentRefreshPolicy::Immediate,
+            |runtime| {
+                let now = chrono::Utc::now();
+                runtime.last_input_at = Some(now);
+                runtime.observed_at = now;
+            },
+        );
     }
 
     pub fn record_agent_output(&self, pane_id: PaneId) {
-        self.refresh_agent_runtime_for_pane_with_update(pane_id, true, |runtime| {
-            let now = chrono::Utc::now();
-            runtime.last_output_at = Some(now);
-            runtime.observed_at = now;
-        });
+        self.refresh_agent_runtime_for_pane_with_update(
+            pane_id,
+            true,
+            AgentRefreshPolicy::Throttled,
+            |runtime| {
+                let now = chrono::Utc::now();
+                runtime.last_output_at = Some(now);
+                runtime.observed_at = now;
+            },
+        );
     }
 
     pub fn record_agent_terminal_progress(
@@ -663,22 +979,33 @@ impl Mux {
         pane_id: PaneId,
         progress: wakterm_term::Progress,
     ) {
-        self.refresh_agent_runtime_for_pane_with_update(pane_id, true, |runtime| {
-            let now = chrono::Utc::now();
-            runtime.terminal_progress = progress;
-            runtime.last_progress_at = Some(now);
-            runtime.observed_at = now;
-        });
+        self.refresh_agent_runtime_for_pane_with_update(
+            pane_id,
+            true,
+            AgentRefreshPolicy::Throttled,
+            |runtime| {
+                let now = chrono::Utc::now();
+                runtime.terminal_progress = progress;
+                runtime.last_progress_at = Some(now);
+                runtime.observed_at = now;
+            },
+        );
     }
 
     fn refresh_agent_runtime_for_pane(&self, pane_id: PaneId, notify_title: bool) {
-        self.refresh_agent_runtime_for_pane_with_update(pane_id, notify_title, |_| {});
+        self.refresh_agent_runtime_for_pane_with_update(
+            pane_id,
+            notify_title,
+            AgentRefreshPolicy::Immediate,
+            |_| {},
+        );
     }
 
     fn refresh_agent_runtime_for_pane_with_update<F>(
         &self,
         pane_id: PaneId,
         notify_title: bool,
+        refresh_policy: AgentRefreshPolicy,
         update: F,
     ) where
         F: FnOnce(&mut AgentRuntimeSnapshot),
@@ -698,6 +1025,7 @@ impl Mux {
             .get(&pane_id)
             .cloned()
             .unwrap_or_else(|| AgentRuntimeSnapshot::new(metadata.as_ref()));
+        let before_title = notify_title.then(|| Self::title_fingerprint(&runtime));
         update(&mut runtime);
         runtime.alive = !pane.is_dead();
         runtime.foreground_process_name = pane.get_foreground_process_name(CachePolicy::AllowStale);
@@ -707,11 +1035,17 @@ impl Mux {
             &metadata.launch_cmd,
             runtime.foreground_process_name.as_deref(),
         );
-        refresh_runtime_from_harness(&mut runtime, metadata.as_ref());
+        let now = Utc::now();
+        if Self::should_refresh_harness_runtime(&runtime, refresh_policy, now) {
+            refresh_runtime_from_harness(&mut runtime, metadata.as_ref());
+        } else {
+            finalize_runtime_snapshot(&mut runtime);
+        }
         runtime.status = derive_runtime_status(&runtime);
+        let after_title = notify_title.then(|| Self::title_fingerprint(&runtime));
         self.agent_runtime_by_pane.write().insert(pane_id, runtime);
 
-        if notify_title {
+        if notify_title && before_title != after_title {
             self.notify_tab_title_changed(tab_id);
         }
     }
@@ -726,7 +1060,11 @@ impl Mux {
             .map(|p| p.pane.pane_id())
             .collect::<Vec<_>>();
         for pane_id in pane_ids {
-            self.refresh_agent_runtime_for_pane(pane_id, false);
+            if self.get_agent_metadata_for_pane(pane_id).is_some() {
+                self.refresh_agent_runtime_for_pane(pane_id, false);
+            } else {
+                self.maybe_auto_adopt_detected_agent(pane_id);
+            }
         }
     }
 
@@ -752,12 +1090,16 @@ impl Mux {
         let Some((_domain_id, _window_id, tab_id)) = self.resolve_pane_id(pane_id) else {
             return;
         };
-        let Some(completed_at) = self
+        let completed_at = self
             .agent_runtime_by_pane
             .read()
             .get(&pane_id)
             .and_then(|runtime| runtime.last_turn_completed_at)
-        else {
+            .or_else(|| {
+                self.detect_agent_state_for_pane(pane_id)
+                    .and_then(|state| state.runtime.last_turn_completed_at)
+            });
+        let Some(completed_at) = completed_at else {
             return;
         };
 
@@ -858,10 +1200,14 @@ impl Mux {
         let mut badge = AgentTabBadgeState::default();
         for positioned in tab.iter_panes_ignoring_zoom() {
             let pane_id = positioned.pane.pane_id();
-            if self.get_agent_metadata_for_pane(pane_id).is_none() {
-                continue;
-            }
-            if let Some(runtime) = runtime_by_pane.get(&pane_id) {
+            let detected_runtime;
+            let runtime = if self.get_agent_metadata_for_pane(pane_id).is_some() {
+                runtime_by_pane.get(&pane_id)
+            } else {
+                detected_runtime = self.detect_agent_state_for_pane(pane_id).map(|state| state.runtime);
+                detected_runtime.as_ref()
+            };
+            if let Some(runtime) = runtime {
                 if Self::agent_waiting_on_user(runtime) {
                     badge.waiting_on_user = true;
                 }
@@ -980,15 +1326,42 @@ impl Mux {
             window_id,
             workspace: window.get_workspace().to_string(),
             domain_id: pane.domain_id(),
+            origin: AgentOrigin::Adopted,
+            detection_source: None,
         })
     }
 
     pub fn list_agents(&self) -> Vec<AgentSnapshot> {
+        if Self::agent_auto_adopt_on_confirmed_session_match() {
+            let pane_ids = self.panes.read().keys().copied().collect::<Vec<_>>();
+            for pane_id in pane_ids {
+                self.maybe_auto_adopt_detected_agent(pane_id);
+            }
+        }
+
         let metadata_by_pane = self.agent_metadata_by_pane.read().clone();
         let mut agents = metadata_by_pane
             .into_iter()
             .filter_map(|(pane_id, metadata)| self.build_agent_snapshot(pane_id, metadata))
             .collect::<Vec<_>>();
+        let mut taken_names = agents
+            .iter()
+            .map(|agent| agent.metadata.name.clone())
+            .collect::<HashSet<_>>();
+        let pane_ids = self.panes.read().keys().copied().collect::<Vec<_>>();
+        for pane_id in pane_ids {
+            if self.get_agent_metadata_for_pane(pane_id).is_some() {
+                continue;
+            }
+            let Some(state) = self.detect_agent_state_for_pane(pane_id) else {
+                continue;
+            };
+            let base_name =
+                Self::detected_agent_name_base(&state.runtime.harness, &state.declared_cwd);
+            let name = Self::next_available_agent_name(&taken_names, &base_name);
+            taken_names.insert(name.clone());
+            agents.push(Self::detected_agent_snapshot_from_state(state, name));
+        }
         agents.sort_by(|a, b| {
             a.metadata
                 .name
@@ -2423,19 +2796,29 @@ mod test {
     use crate::renderable::{RenderableDimensions, StableCursorPosition};
     use anyhow::Error;
     use async_trait::async_trait;
-    use chrono::{TimeZone, Utc};
+    use chrono::{Datelike, TimeZone, Utc};
     use parking_lot::{MappedMutexGuard, Mutex};
+    use procinfo::{LocalProcessInfo, LocalProcessStatus};
     use rangeset::RangeSet;
+    use std::collections::HashMap;
     use std::ops::Range;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
     use termwiz::surface::SequenceNo;
     use url::Url;
     use wakterm_term::color::ColorPalette;
     use wakterm_term::{KeyCode, KeyModifiers, Line, MouseEvent, StableRowIndex};
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct FakePane {
         id: PaneId,
         size: Mutex<TerminalSize>,
         domain_id: DomainId,
+        title: String,
+        cwd: Option<Url>,
+        foreground_process_name: Option<String>,
+        foreground_process_info: Option<LocalProcessInfo>,
     }
 
     impl FakePane {
@@ -2444,6 +2827,44 @@ mod test {
                 id,
                 size: Mutex::new(size),
                 domain_id,
+                title: String::new(),
+                cwd: None,
+                foreground_process_name: None,
+                foreground_process_info: None,
+            })
+        }
+
+        fn new_detected(
+            id: PaneId,
+            size: TerminalSize,
+            domain_id: DomainId,
+            title: &str,
+            cwd: &str,
+            foreground_process_name: &str,
+            argv: &[&str],
+        ) -> Arc<dyn Pane> {
+            Arc::new(Self {
+                id,
+                size: Mutex::new(size),
+                domain_id,
+                title: title.to_string(),
+                cwd: Some(Url::from_file_path(cwd).unwrap()),
+                foreground_process_name: Some(foreground_process_name.to_string()),
+                foreground_process_info: Some(LocalProcessInfo {
+                    pid: 1,
+                    ppid: 0,
+                    name: PathBuf::from(foreground_process_name)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(foreground_process_name)
+                        .to_string(),
+                    executable: PathBuf::from(foreground_process_name),
+                    argv: argv.iter().map(|arg| (*arg).to_string()).collect(),
+                    cwd: PathBuf::from(cwd),
+                    status: LocalProcessStatus::Run,
+                    start_time: 1,
+                    children: HashMap::new(),
+                }),
             })
         }
     }
@@ -2512,7 +2933,7 @@ mod test {
         }
 
         fn get_title(&self) -> String {
-            String::new()
+            self.title.clone()
         }
 
         fn send_paste(&self, _text: &str) -> anyhow::Result<()> {
@@ -2565,7 +2986,15 @@ mod test {
         }
 
         fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
-            None
+            self.cwd.clone()
+        }
+
+        fn get_foreground_process_name(&self, _policy: CachePolicy) -> Option<String> {
+            self.foreground_process_name.clone()
+        }
+
+        fn get_foreground_process_info(&self, _policy: CachePolicy) -> Option<LocalProcessInfo> {
+            self.foreground_process_info.clone()
         }
     }
 
@@ -2830,9 +3259,14 @@ mod test {
 
     impl TestConfigGuard {
         fn new(mode: &str, badge: &str) -> Self {
+            Self::new_with_auto_adopt(mode, badge, false)
+        }
+
+        fn new_with_auto_adopt(mode: &str, badge: &str, auto_adopt: bool) -> Self {
             let mut config = config::Config::default();
             config.agent_tab_badge_mode = mode.to_string();
             config.agent_tab_badge = badge.to_string();
+            config.agent_auto_adopt_on_confirmed_session_match = auto_adopt;
             config::use_this_configuration(config);
             Self
         }
@@ -2924,6 +3358,271 @@ mod test {
         assert!(runtime.last_input_at.is_some());
         assert!(runtime.last_output_at.is_some());
         assert_eq!(runtime.foreground_process_name, None);
+    }
+
+    #[test]
+    fn repeated_output_without_badge_change_does_not_emit_tab_title_change() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new(142, size, domain.id);
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_agent_metadata(pane_id, sample_agent_metadata("quiet"))
+            .unwrap();
+
+        let title_changes = std::sync::Arc::new(Mutex::new(0usize));
+        let title_changes_for_sub = std::sync::Arc::clone(&title_changes);
+        mux.subscribe(move |notification| {
+            if matches!(notification, MuxNotification::TabTitleChanged { .. }) {
+                *title_changes_for_sub.lock() += 1;
+            }
+            true
+        });
+
+        mux.notify(MuxNotification::PaneOutput(pane_id));
+
+        assert_eq!(*title_changes.lock(), 0);
+    }
+
+    #[test]
+    fn repeated_output_throttles_harness_refresh() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let day = Utc::now();
+        let dir = temp
+            .path()
+            .join(format!("{:04}", day.year_ce().1))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("rollout-throttle.jsonl");
+        std::fs::write(
+            &session,
+            concat!(
+                "{\"payload\":{\"cwd\":\"/tmp/throttle-project\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"default\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[]}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:02Z\",\"payload\":{\"type\":\"agent_message\",\"phase\":\"commentary\"}}\n"
+            ),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("WAKTERM_AGENT_CODEX_DIR", temp.path());
+        }
+
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new_detected(
+            147,
+            size,
+            domain.id,
+            "codex",
+            "/tmp/throttle-project",
+            "/usr/bin/codex",
+            &["codex"],
+        );
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_agent_metadata(
+            pane_id,
+            AgentMetadata {
+                agent_id: "agent-throttle".to_string(),
+                name: "throttle".to_string(),
+                launch_cmd: "codex".to_string(),
+                declared_cwd: "/tmp/throttle-project".to_string(),
+                created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
+                repo_root: None,
+                worktree: None,
+                branch: None,
+                managed_checkout: false,
+            },
+        )
+        .unwrap();
+
+        let first_refresh = mux
+            .agent_runtime_by_pane
+            .read()
+            .get(&pane_id)
+            .and_then(|runtime| runtime.last_harness_refresh_at)
+            .expect("initial harness refresh");
+
+        mux.record_agent_output(pane_id);
+        let throttled_refresh = mux
+            .agent_runtime_by_pane
+            .read()
+            .get(&pane_id)
+            .and_then(|runtime| runtime.last_harness_refresh_at)
+            .expect("throttled harness refresh timestamp");
+        assert_eq!(throttled_refresh, first_refresh);
+
+        std::thread::sleep(AGENT_HARNESS_REFRESH_THROTTLE + Duration::from_millis(50));
+        mux.record_agent_output(pane_id);
+        let refreshed_again = mux
+            .agent_runtime_by_pane
+            .read()
+            .get(&pane_id)
+            .and_then(|runtime| runtime.last_harness_refresh_at)
+            .expect("refresh after throttle window");
+        assert!(refreshed_again > first_refresh);
+
+        unsafe {
+            std::env::remove_var("WAKTERM_AGENT_CODEX_DIR");
+        }
+    }
+
+    #[test]
+    fn detected_harness_panes_are_listed_without_adoption() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new_detected(
+            145,
+            size,
+            domain.id,
+            "codex",
+            "/tmp/wakterm",
+            "/usr/bin/codex",
+            &["codex", "-a", "never"],
+        );
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let agents = mux.list_agents();
+        assert_eq!(agents.len(), 1);
+        let agent = &agents[0];
+        assert!(matches!(agent.origin, AgentOrigin::Detected));
+        assert_eq!(agent.metadata.name, "wakterm_codex");
+        assert_eq!(agent.metadata.launch_cmd, "codex -a never");
+        assert_eq!(agent.metadata.declared_cwd, "/tmp/wakterm");
+        assert_eq!(agent.pane_id, pane_id);
+        assert_eq!(agent.workspace, DEFAULT_WORKSPACE);
+        assert_eq!(agent.detection_source.as_deref(), Some("proc+title"));
+        assert_eq!(agent.runtime.harness, crate::agent::AgentHarness::Codex);
+        assert!(mux.get_agent_metadata_for_pane(pane_id).is_none());
+    }
+
+    #[test]
+    fn confirmed_detected_sessions_can_auto_adopt() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let day = Utc::now();
+        let dir = temp
+            .path()
+            .join(format!("{:04}", day.year_ce().1))
+            .join(format!("{:02}", day.month()))
+            .join(format!("{:02}", day.day()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("rollout-auto-adopt.jsonl");
+        std::fs::write(
+            &session,
+            concat!(
+                "{\"payload\":{\"cwd\":\"/tmp/auto-adopt-project\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"default\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[]}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:02Z\",\"payload\":{\"type\":\"agent_message\",\"phase\":\"final_answer\"}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T12:00:03Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-03-17T12:00:04Z\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"done\"}}\n"
+            ),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("WAKTERM_AGENT_CODEX_DIR", temp.path());
+        }
+
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+        let _config = TestConfigGuard::new_with_auto_adopt("attention", "🤖 ", true);
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new_detected(
+            146,
+            size,
+            domain.id,
+            "codex",
+            "/tmp/auto-adopt-project",
+            "/usr/bin/codex",
+            &["codex"],
+        );
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let agents = mux.list_agents();
+        unsafe {
+            std::env::remove_var("WAKTERM_AGENT_CODEX_DIR");
+        }
+        let session_path = session.to_string_lossy().to_string();
+
+        assert_eq!(agents.len(), 1);
+        let agent = &agents[0];
+        assert!(matches!(agent.origin, AgentOrigin::Adopted));
+        assert_eq!(agent.metadata.name, "auto_adopt_project_codex");
+        assert_eq!(agent.runtime.session_path.as_deref(), Some(session_path.as_str()));
+        assert!(mux.get_agent_metadata_for_pane(pane_id).is_some());
     }
 
     #[test]

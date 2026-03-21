@@ -3,6 +3,7 @@ use crate::pane::PaneId;
 use crate::tab::TabId;
 use crate::window::WindowId;
 use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
+use procinfo::LocalProcessInfo;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,6 +58,14 @@ pub enum AgentTurnState {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOrigin {
+    #[default]
+    Adopted,
+    Detected,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTabBadgeState {
     pub waiting_on_user: bool,
     pub needs_attention: bool,
@@ -88,6 +97,8 @@ pub struct AgentRuntimeSnapshot {
     pub observer_error: Option<String>,
     #[serde(skip, default)]
     pub observer_started_at: Option<DateTime<Utc>>,
+    #[serde(skip, default)]
+    pub last_harness_refresh_at: Option<DateTime<Utc>>,
 }
 
 impl AgentRuntimeSnapshot {
@@ -115,6 +126,7 @@ impl AgentRuntimeSnapshot {
             terminal_progress: Progress::None,
             observer_error: None,
             observer_started_at: None,
+            last_harness_refresh_at: None,
         }
     }
 }
@@ -128,6 +140,16 @@ pub struct AgentSnapshot {
     pub window_id: WindowId,
     pub workspace: String,
     pub domain_id: DomainId,
+    #[serde(default)]
+    pub origin: AgentOrigin,
+    #[serde(default)]
+    pub detection_source: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentProcessMatch {
+    pub harness: AgentHarness,
+    pub launch_cmd: String,
 }
 
 pub fn prime_runtime_for_new_agent(
@@ -146,6 +168,7 @@ pub fn prime_runtime_for_new_agent(
     }
 
     runtime.observer_started_at = Some(metadata.created_at);
+    runtime.last_harness_refresh_at = None;
     runtime.session_path = None;
     runtime.progress_summary = None;
     runtime.harness_mode = None;
@@ -176,6 +199,94 @@ pub fn infer_harness(launch_cmd: &str, foreground_process_name: Option<&str>) ->
         }
     }
     AgentHarness::Unknown
+}
+
+pub fn default_launch_cmd_for_harness(harness: &AgentHarness) -> Option<&'static str> {
+    match harness {
+        AgentHarness::Claude => Some("claude"),
+        AgentHarness::Codex => Some("codex"),
+        AgentHarness::Gemini => Some("gemini"),
+        AgentHarness::Opencode => Some("opencode"),
+        AgentHarness::Unknown => None,
+    }
+}
+
+fn infer_harness_from_process_info(process: &LocalProcessInfo) -> AgentHarness {
+    let executable = process
+        .executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let mut values = vec![process.name.as_str(), executable];
+    values.extend(process.argv.iter().map(String::as_str));
+    infer_harness(&values.join(" "), Some(executable))
+}
+
+fn format_process_command(process: &LocalProcessInfo) -> Option<String> {
+    if !process.argv.is_empty() {
+        return Some(
+            process
+                .argv
+                .iter()
+                .map(|arg| shell_words::quote(arg))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+
+    let executable = process.executable.to_string_lossy();
+    if executable.is_empty() {
+        None
+    } else {
+        Some(shell_words::quote(&executable).to_string())
+    }
+}
+
+fn best_harness_process(process: &LocalProcessInfo) -> Option<(u64, AgentProcessMatch)> {
+    let mut best = match infer_harness_from_process_info(process) {
+        AgentHarness::Unknown => None,
+        harness => format_process_command(process).map(|launch_cmd| {
+            (
+                process.start_time,
+                AgentProcessMatch {
+                    harness,
+                    launch_cmd,
+                },
+            )
+        }),
+    };
+
+    for child in process.children.values() {
+        if let Some(candidate) = best_harness_process(child) {
+            let replace = best
+                .as_ref()
+                .map(|(start_time, _)| candidate.0 >= *start_time)
+                .unwrap_or(true);
+            if replace {
+                best = Some(candidate);
+            }
+        }
+    }
+
+    best
+}
+
+pub fn detect_harness_process(
+    process: Option<&LocalProcessInfo>,
+    foreground_process_name: Option<&str>,
+) -> Option<AgentProcessMatch> {
+    if let Some(process) = process {
+        if let Some((_, matched)) = best_harness_process(process) {
+            return Some(matched);
+        }
+    }
+
+    let harness = infer_harness("", foreground_process_name);
+    let launch_cmd = default_launch_cmd_for_harness(&harness)?;
+    Some(AgentProcessMatch {
+        harness,
+        launch_cmd: launch_cmd.to_string(),
+    })
 }
 
 fn harness_process_is_compatible(
@@ -281,19 +392,20 @@ fn derive_attention_reason(runtime: &AgentRuntimeSnapshot) -> Option<String> {
 }
 
 pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata: &AgentMetadata) {
+    let now = Utc::now();
+    runtime.last_harness_refresh_at = Some(now);
     let normalized_cwd = normalize_declared_cwd(&metadata.declared_cwd);
     let cwd = normalized_cwd.trim();
     if cwd.is_empty() {
-        runtime.observed_at = Utc::now();
+        runtime.observed_at = now;
         runtime.turn_state = AgentTurnState::Unknown;
         runtime.last_turn_completed_at = None;
-        runtime.status = derive_runtime_status(runtime);
-        runtime.attention_reason = derive_attention_reason(runtime);
+        finalize_runtime_snapshot(runtime);
         return;
     }
 
     runtime.observer_error = None;
-    runtime.observed_at = Utc::now();
+    runtime.observed_at = now;
     let configured_harness = infer_harness(&metadata.launch_cmd, None);
     let process_harness = infer_harness("", runtime.foreground_process_name.as_deref());
     runtime.harness = match configured_harness {
@@ -319,8 +431,7 @@ pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata
         runtime.turn_state = AgentTurnState::Unknown;
         runtime.last_turn_completed_at = None;
         runtime.transport = AgentTransport::PlainPty;
-        runtime.status = derive_runtime_status(runtime);
-        runtime.attention_reason = derive_attention_reason(runtime);
+        finalize_runtime_snapshot(runtime);
         return;
     };
 
@@ -398,6 +509,10 @@ pub fn refresh_runtime_from_harness(runtime: &mut AgentRuntimeSnapshot, metadata
     } else {
         AgentTransport::PlainPty
     };
+    finalize_runtime_snapshot(runtime);
+}
+
+pub fn finalize_runtime_snapshot(runtime: &mut AgentRuntimeSnapshot) {
     runtime.turn_state = derive_effective_turn_state(runtime);
     runtime.status = derive_runtime_status(runtime);
     runtime.attention_reason = derive_attention_reason(runtime);
@@ -1634,6 +1749,8 @@ fn normalize_declared_cwd(cwd: &str) -> String {
 mod test {
     use super::*;
     use chrono::TimeZone;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -1648,6 +1765,29 @@ mod test {
     fn remove_env_var(key: &str) {
         unsafe {
             std::env::remove_var(key);
+        }
+    }
+
+    fn proc_info(
+        name: &str,
+        executable: &str,
+        argv: &[&str],
+        start_time: u64,
+        children: Vec<LocalProcessInfo>,
+    ) -> LocalProcessInfo {
+        LocalProcessInfo {
+            pid: start_time as u32,
+            ppid: 0,
+            name: name.to_string(),
+            executable: PathBuf::from(executable),
+            argv: argv.iter().map(|arg| (*arg).to_string()).collect(),
+            cwd: PathBuf::from("/tmp"),
+            status: procinfo::LocalProcessStatus::Run,
+            start_time,
+            children: children
+                .into_iter()
+                .map(|child| (child.pid, child))
+                .collect::<HashMap<_, _>>(),
         }
     }
 
@@ -1699,6 +1839,34 @@ mod test {
             infer_harness("python agent.py", None),
             AgentHarness::Unknown
         );
+    }
+
+    #[test]
+    fn detects_harness_process_from_process_tree() {
+        let process = proc_info(
+            "zsh",
+            "/usr/bin/zsh",
+            &["zsh"],
+            1,
+            vec![proc_info(
+                "codex",
+                "/usr/bin/codex",
+                &["codex", "-a", "never"],
+                2,
+                vec![],
+            )],
+        );
+
+        let matched = detect_harness_process(Some(&process), Some("/usr/bin/zsh")).unwrap();
+        assert_eq!(matched.harness, AgentHarness::Codex);
+        assert_eq!(matched.launch_cmd, "codex -a never");
+    }
+
+    #[test]
+    fn falls_back_to_foreground_process_name_for_detection() {
+        let matched = detect_harness_process(None, Some("/usr/bin/claude")).unwrap();
+        assert_eq!(matched.harness, AgentHarness::Claude);
+        assert_eq!(matched.launch_cmd, "claude");
     }
 
     #[test]

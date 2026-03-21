@@ -6,8 +6,8 @@ use codec::{InputSerial, ListPanesResponse, SendKeyDown, SpawnV2, TabTitleChange
 use config::keyassignment::SpawnTabDomain;
 use config::ConfigHandle;
 use mux::agent::{
-    infer_harness, pending_observer_detail, AgentHarness, AgentMetadata, AgentSnapshot,
-    AgentStatus, AgentTransport, AgentTurnState,
+    infer_harness, pending_observer_detail, AgentHarness, AgentMetadata, AgentOrigin,
+    AgentSnapshot, AgentStatus, AgentTransport, AgentTurnState,
 };
 use mux::pane::PaneId;
 use mux::tab::{SplitDirection, SplitRequest, SplitSize};
@@ -45,16 +45,22 @@ enum AgentSubCommand {
     #[command(name = "adopt", about = "adopt an existing pane as an agent")]
     Adopt(AdoptAgentCommand),
 
-    #[command(name = "list", about = "list agent-tagged panes")]
+    #[command(
+        name = "adopt-detected",
+        about = "promote a detected harness pane into persistent agent metadata"
+    )]
+    AdoptDetected(AdoptDetectedAgentCommand),
+
+    #[command(name = "list", about = "list adopted and detected agent panes")]
     List(ListAgentsCommand),
 
     #[command(
         name = "watch",
-        about = "stream latest observer-backed harness messages for agent panes"
+        about = "stream latest observer-backed harness messages for adopted and detected agent panes"
     )]
     Watch(WatchAgentsCommand),
 
-    #[command(name = "inspect", about = "inspect a single agent by name or id")]
+    #[command(name = "inspect", about = "inspect a single adopted or detected agent by name or id")]
     Inspect(InspectAgentCommand),
 
     #[command(name = "send", about = "send a message to an agent pane")]
@@ -75,6 +81,7 @@ impl AgentCommand {
         match &self.sub {
             AgentSubCommand::Start(cmd) => cmd.run(client, config).await,
             AgentSubCommand::Adopt(cmd) => cmd.run(client).await,
+            AgentSubCommand::AdoptDetected(cmd) => cmd.run(client).await,
             AgentSubCommand::List(cmd) => cmd.run(client).await,
             AgentSubCommand::Watch(cmd) => cmd.run(client).await,
             AgentSubCommand::Inspect(cmd) => cmd.run(client).await,
@@ -989,6 +996,10 @@ impl ListAgentsCommand {
                         alignment: Alignment::Left,
                     },
                     Column {
+                        name: "ORIGIN".to_string(),
+                        alignment: Alignment::Left,
+                    },
+                    Column {
                         name: "PANEID".to_string(),
                         alignment: Alignment::Right,
                     },
@@ -1038,6 +1049,10 @@ impl ListAgentsCommand {
                     .map(|agent| {
                         vec![
                             agent.metadata.name.clone(),
+                            match agent.origin {
+                                AgentOrigin::Adopted => "adopted".to_string(),
+                                AgentOrigin::Detected => "detected".to_string(),
+                            },
                             agent.pane_id.to_string(),
                             agent.tab_id.to_string(),
                             agent.window_id.to_string(),
@@ -1129,7 +1144,7 @@ impl WatchAgentsCommand {
 
 #[derive(Debug, Parser, Clone)]
 pub struct InspectAgentCommand {
-    /// Agent name or stable id
+    /// Agent name, stable id, or pane id
     target: String,
 }
 
@@ -1145,7 +1160,7 @@ impl InspectAgentCommand {
 
 #[derive(Debug, Parser, Clone)]
 pub struct SendAgentCommand {
-    /// Agent name or stable id
+    /// Agent name, stable id, or pane id
     target: String,
 
     /// Send the text directly, rather than as a bracketed paste
@@ -1330,7 +1345,7 @@ where
 
 #[derive(Debug, Parser, Clone)]
 pub struct InterruptAgentCommand {
-    /// Agent name or stable id
+    /// Agent name, stable id, or pane id
     target: String,
 
     /// Maximum time to wait for observer-backed acknowledgement
@@ -1520,6 +1535,112 @@ impl AdoptAgentCommand {
             .agents
             .into_iter()
             .find(|agent| agent.pane_id == pane_id)
+            .ok_or_else(|| anyhow::anyhow!("agent metadata was set but could not be reloaded"))?;
+
+        write_json(&updated)
+    }
+}
+
+#[derive(Debug, Parser, Clone)]
+pub struct AdoptDetectedAgentCommand {
+    /// Detected agent name, synthetic id, or pane id
+    target: String,
+
+    /// Override the detected stable name before adoption
+    #[arg(long)]
+    name: Option<String>,
+}
+
+impl AdoptDetectedAgentCommand {
+    async fn run(&self, client: Client) -> anyhow::Result<()> {
+        self.run_with(
+            || client.list_agents(),
+            || client.list_panes(),
+            || client.list_agents(),
+            |request| client.set_agent_metadata(request),
+        )
+        .await
+    }
+
+    async fn run_with<
+        ListAgents,
+        ListAgentsFut,
+        ListPanes,
+        ListPanesFut,
+        ListAgentsAfterSet,
+        ListAgentsAfterSetFut,
+        SetAgentMetadataFn,
+        SetAgentMetadataFut,
+    >(
+        &self,
+        list_agents: ListAgents,
+        list_panes: ListPanes,
+        list_agents_after_set: ListAgentsAfterSet,
+        set_agent_metadata: SetAgentMetadataFn,
+    ) -> anyhow::Result<()>
+    where
+        ListAgents: FnOnce() -> ListAgentsFut,
+        ListAgentsFut: Future<Output = anyhow::Result<codec::ListAgentsResponse>>,
+        ListPanes: FnOnce() -> ListPanesFut,
+        ListPanesFut: Future<Output = anyhow::Result<ListPanesResponse>>,
+        ListAgentsAfterSet: FnOnce() -> ListAgentsAfterSetFut,
+        ListAgentsAfterSetFut: Future<Output = anyhow::Result<codec::ListAgentsResponse>>,
+        SetAgentMetadataFn: FnOnce(codec::SetAgentMetadata) -> SetAgentMetadataFut,
+        SetAgentMetadataFut: Future<Output = anyhow::Result<codec::UnitResponse>>,
+    {
+        let agents = list_agents().await?.agents;
+        let detected = find_detected_agent(&agents, &self.target)
+            .cloned()
+            .with_context(|| format!("no detected agent named or identified by {}", self.target))?;
+        let panes = list_panes().await?;
+        let name = self
+            .name
+            .as_deref()
+            .unwrap_or(detected.metadata.name.as_str());
+
+        if let Some(existing) = agents
+            .iter()
+            .find(|agent| {
+                matches!(agent.origin, AgentOrigin::Adopted)
+                    && agent.metadata.name == name
+                    && agent.pane_id != detected.pane_id
+            })
+        {
+            bail!(
+                "agent name {} is already assigned to pane {}",
+                name,
+                existing.pane_id
+            );
+        }
+
+        let declared_cwd = Some(detected.metadata.declared_cwd.clone())
+            .or_else(|| find_pane_cwd(&panes, detected.pane_id))
+            .ok_or_else(|| anyhow::anyhow!("unable to determine cwd; pass --cwd"))?;
+        let metadata = AgentMetadata {
+            agent_id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            launch_cmd: detected.metadata.launch_cmd.clone(),
+            declared_cwd,
+            created_at: detected.metadata.created_at,
+            repo_root: detected.metadata.repo_root.clone(),
+            worktree: detected.metadata.worktree.clone(),
+            branch: detected.metadata.branch.clone(),
+            managed_checkout: detected.metadata.managed_checkout,
+        };
+
+        set_agent_metadata(codec::SetAgentMetadata {
+            pane_id: detected.pane_id,
+            metadata,
+        })
+        .await?;
+
+        let updated = list_agents_after_set()
+            .await?
+            .agents
+            .into_iter()
+            .find(|agent| {
+                agent.pane_id == detected.pane_id && matches!(agent.origin, AgentOrigin::Adopted)
+            })
             .ok_or_else(|| anyhow::anyhow!("agent metadata was set but could not be reloaded"))?;
 
         write_json(&updated)
@@ -1871,9 +1992,20 @@ fn write_json<T: Serialize>(value: &T) -> anyhow::Result<()> {
 }
 
 fn find_agent<'a>(agents: &'a [AgentSnapshot], target: &str) -> Option<&'a AgentSnapshot> {
-    agents
-        .iter()
-        .find(|agent| agent.metadata.name == target || agent.metadata.agent_id == target)
+    agents.iter().find(|agent| {
+        agent.metadata.name == target
+            || agent.metadata.agent_id == target
+            || agent.pane_id.to_string() == target
+    })
+}
+
+fn find_detected_agent<'a>(agents: &'a [AgentSnapshot], target: &str) -> Option<&'a AgentSnapshot> {
+    agents.iter().find(|agent| {
+        matches!(agent.origin, AgentOrigin::Detected)
+            && (agent.metadata.name == target
+                || agent.metadata.agent_id == target
+                || agent.pane_id.to_string() == target)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2301,13 +2433,25 @@ mod test {
                 terminal_progress: wakterm_term::Progress::None,
                 observer_error: None,
                 observer_started_at: None,
+                last_harness_refresh_at: None,
             },
             pane_id,
             tab_id: 20,
             window_id: 10,
             workspace: "default".to_string(),
             domain_id: 1,
+            origin: AgentOrigin::Adopted,
+            detection_source: None,
         }
+    }
+
+    fn sample_detected_agent(pane_id: PaneId, name: &str) -> AgentSnapshot {
+        let mut agent = sample_agent(pane_id, name);
+        agent.metadata.agent_id = format!("detected-pane-{pane_id}");
+        agent.metadata.created_at = Utc.with_ymd_and_hms(2026, 3, 17, 11, 59, 0).unwrap();
+        agent.origin = AgentOrigin::Detected;
+        agent.detection_source = Some("proc+session+title".to_string());
+        agent
     }
 
     fn sample_spawn_response(pane_id: PaneId, tab_id: mux::tab::TabId) -> SpawnResponse {
@@ -3073,6 +3217,45 @@ mod test {
         assert_eq!(calls[0].metadata.launch_cmd, "codex --profile fast");
         assert_eq!(calls[0].metadata.declared_cwd, pane_path_string(30));
         assert!(!calls[0].metadata.managed_checkout);
+    }
+
+    #[test]
+    fn adopt_detected_promotes_detected_snapshot_with_preserved_start_time() {
+        let calls = Rc::new(RefCell::new(vec![]));
+        let command = AdoptDetectedAgentCommand {
+            target: "reviewer_codex".to_string(),
+            name: Some("reviewer".to_string()),
+        };
+        let detected = sample_detected_agent(30, "reviewer_codex");
+
+        promise::spawn::block_on(command.run_with(
+            || async {
+                Ok(ListAgentsResponse {
+                    agents: vec![detected.clone()],
+                })
+            },
+            || async { Ok(panes_response(vec![leaf(10, 20, 30)])) },
+            || async {
+                let mut adopted = sample_agent(30, "reviewer");
+                adopted.metadata.created_at = detected.metadata.created_at;
+                Ok(ListAgentsResponse {
+                    agents: vec![adopted],
+                })
+            },
+            |request| {
+                calls.borrow_mut().push(request);
+                async { Ok(UnitResponse {}) }
+            },
+        ))
+        .unwrap();
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].pane_id, 30);
+        assert_eq!(calls[0].metadata.name, "reviewer");
+        assert_eq!(calls[0].metadata.launch_cmd, detected.metadata.launch_cmd);
+        assert_eq!(calls[0].metadata.declared_cwd, detected.metadata.declared_cwd);
+        assert_eq!(calls[0].metadata.created_at, detected.metadata.created_at);
     }
 
     #[test]

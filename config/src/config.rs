@@ -195,6 +195,12 @@ pub struct Config {
     #[dynamic(default = "default_agent_tab_badge")]
     pub agent_tab_badge: String,
 
+    /// Automatically adopt a detected harness pane once its session observer
+    /// confirms a backing session. This is disabled by default so that weak
+    /// title/process heuristics never persist metadata on their own.
+    #[dynamic(default)]
+    pub agent_auto_adopt_on_confirmed_session_match: bool,
+
     #[dynamic(default)]
     pub resolved_palette: Palette,
 
