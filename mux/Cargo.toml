@@ -63,5 +63,10 @@ winapi = { workspace=true, features = [
 ]}
 
 [dev-dependencies]
+criterion.workspace = true
 k9.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "pane_output"
+harness = false
