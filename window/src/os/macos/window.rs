@@ -3099,28 +3099,32 @@ impl WindowView {
 
     extern "C" fn draw_rect(view: &mut Object, sel: Sel, _dirty_rect: NSRect) {
         let view_id = view as *mut Object as id;
-        if let Some(this) = Self::get_this(view) {
-            match this.inner.try_borrow_mut() {
-                Ok(mut inner) => {
-                    if inner.screen_changed {
-                        inner.screen_changed = false;
-                        drop(inner);
-                        Self::did_resize(view, sel, nil);
-                        return;
-                    }
 
-                    inner.events.dispatch(WindowEvent::NeedRepaint);
-                    inner.invalidated = false;
-                    inner.paint_throttled = false;
-                }
-                Err(_) => {
-                    // Inner is already borrowed; schedule another
-                    // display pass rather than panicking across FFI.
-                    unsafe {
-                        let () = msg_send![view_id, setNeedsDisplay: YES];
-                    }
+        // Check screen_changed first, dropping all borrows before
+        // calling did_resize which needs &mut view.
+        let needs_resize = Self::get_this(view).and_then(|this| {
+            let mut inner = this.inner.try_borrow_mut().ok()?;
+            if inner.screen_changed {
+                inner.screen_changed = false;
+                Some(true)
+            } else {
+                inner.events.dispatch(WindowEvent::NeedRepaint);
+                inner.invalidated = false;
+                inner.paint_throttled = false;
+                Some(false)
+            }
+        });
+
+        match needs_resize {
+            Some(true) => Self::did_resize(view, sel, nil),
+            None => {
+                // Inner is already borrowed; schedule another
+                // display pass rather than panicking across FFI.
+                unsafe {
+                    let () = msg_send![view_id, setNeedsDisplay: YES];
                 }
             }
+            _ => {}
         }
     }
 

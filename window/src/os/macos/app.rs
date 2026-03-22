@@ -4,7 +4,7 @@ use crate::macos::{nsstring, nsstring_to_str};
 use crate::menu::{Menu, MenuItem};
 use crate::{ApplicationEvent, Connection};
 use cocoa::appkit::NSApplicationTerminateReply;
-use cocoa::base::{id, nil};
+use cocoa::base::id;
 use cocoa::foundation::NSInteger;
 use config::keyassignment::KeyAssignment;
 use config::WindowCloseConfirmation;
