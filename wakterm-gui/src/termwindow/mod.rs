@@ -583,7 +583,14 @@ impl TermWindow {
                 log::debug!(
                     "focus_changed recording focus for identity focused={focused} pane_id={pane_id}"
                 );
-                Mux::get().record_focus_for_current_identity(pane.pane_id());
+                let mux = Mux::get();
+                if let Some(client_id) = mux.active_identity() {
+                    if let Err(err) = mux.set_focused_pane_for_client(client_id.as_ref(), pane_id) {
+                        log::error!(
+                            "focus_changed failed to record focus for current identity pane_id={pane_id}: {err:#}"
+                        );
+                    }
+                }
                 log::debug!(
                     "focus_changed recorded focus for identity focused={focused} pane_id={pane_id}"
                 );
