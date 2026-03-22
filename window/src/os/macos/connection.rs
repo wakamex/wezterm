@@ -74,20 +74,36 @@ impl Connection {
         promise::spawn::spawn_into_main_thread(async move {
             let mut f = Some(f);
             loop {
-                let Some(handle) = Connection::get().unwrap().window_by_id(window_id) else {
-                    prom.err(anyhow::anyhow!("window id {} is invalid", window_id));
-                    break;
+                enum NextStep<R> {
+                    Complete(anyhow::Result<R>),
+                    Retry,
+                    MissingWindow,
+                }
+
+                let next = {
+                    let Some(handle) = Connection::get().unwrap().window_by_id(window_id) else {
+                        NextStep::MissingWindow
+                    };
+
+                    match handle.try_borrow_mut() {
+                        Ok(mut inner) => NextStep::Complete(f.take().unwrap()(&mut inner)),
+                        Err(_) => NextStep::Retry,
+                    }
                 };
 
-                match handle.try_borrow_mut() {
-                    Ok(mut inner) => {
-                        prom.result(f.take().unwrap()(&mut inner));
+                match next {
+                    NextStep::Complete(result) => {
+                        prom.result(result);
                         break;
                     }
-                    Err(_) => {
+                    NextStep::MissingWindow => {
+                        prom.err(anyhow::anyhow!("window id {} is invalid", window_id));
+                        break;
+                    }
+                    NextStep::Retry => {
                         let _ = async_io::Timer::after(Duration::from_millis(1)).await;
                     }
-                }
+                };
             }
         })
         .detach();
