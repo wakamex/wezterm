@@ -3101,27 +3101,14 @@ impl WindowView {
                 return;
             }
 
-            if inner.paint_throttled {
-                inner.invalidated = true;
-            } else {
-                inner.events.dispatch(WindowEvent::NeedRepaint);
-                inner.invalidated = false;
-                inner.paint_throttled = true;
-
-                let max_fps = inner.config.max_fps;
-                let interval = 1.0 / max_fps as f64;
-                drop(inner);
-                unsafe {
-                    let timer: id =
-                        msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: interval
-                            target: view_id
-                            selector: sel!(waktermFinishPaintThrottle:)
-                            userInfo: nil
-                            repeats: NO
-                        ];
-                    let (): () = msg_send![timer, setTolerance: interval];
-                }
-            }
+            // The paint throttle has proven unreliable on macOS in the SSHMUX
+            // attach path: the first frame is rendered, later invalidations
+            // accumulate, and the window appears frozen because subsequent
+            // NeedRepaint events never fire. Favor correctness here and allow
+            // each invalidation to trigger a repaint directly.
+            inner.events.dispatch(WindowEvent::NeedRepaint);
+            inner.invalidated = false;
+            inner.paint_throttled = false;
         }
     }
 
