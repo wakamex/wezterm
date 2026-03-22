@@ -124,6 +124,7 @@ pub struct Mux {
     domains: RwLock<HashMap<DomainId, Arc<dyn Domain>>>,
     domains_by_name: RwLock<HashMap<String, Arc<dyn Domain>>>,
     subscribers: RwLock<HashMap<usize, Box<dyn Fn(MuxNotification) -> bool + Send + Sync>>>,
+    pending_pane_output_notifications: Mutex<HashSet<PaneId>>,
     banner: RwLock<Option<String>>,
     clients: RwLock<HashMap<ClientId, ClientInfo>>,
     client_views: RwLock<HashMap<ClientViewId, ClientViewState>>,
@@ -594,6 +595,7 @@ impl Mux {
             domains_by_name: RwLock::new(domains_by_name),
             domains: RwLock::new(domains),
             subscribers: RwLock::new(HashMap::new()),
+            pending_pane_output_notifications: Mutex::new(HashSet::new()),
             banner: RwLock::new(None),
             clients: RwLock::new(HashMap::new()),
             client_views: RwLock::new(HashMap::new()),
@@ -1957,10 +1959,7 @@ impl Mux {
             "focus_pane_and_containing_tab start pane_id={pane_id} window_id={window_id} tab_id={tab_id}"
         );
 
-        self.set_active_pane_for_current_identity(window_id, tab_id, pane_id)?;
-        if let Some(view_id) = self.active_view_id() {
-            self.acknowledge_agent_attention_for_view(view_id.as_ref(), pane_id);
-        }
+        self.reconcile_focused_pane_for_current_identity(pane_id)?;
 
         // Focus/activate the pane locally
         let tab = self
@@ -1973,6 +1972,20 @@ impl Mux {
             "focus_pane_and_containing_tab complete pane_id={pane_id} window_id={window_id} tab_id={tab_id}"
         );
 
+        Ok(())
+    }
+
+    pub fn reconcile_focused_pane_for_current_identity(
+        &self,
+        pane_id: PaneId,
+    ) -> anyhow::Result<()> {
+        let (_domain_id, window_id, tab_id) = self
+            .resolve_pane_id(pane_id)
+            .ok_or_else(|| anyhow::anyhow!("can't find {pane_id} in the mux"))?;
+        self.set_active_pane_for_current_identity(window_id, tab_id, pane_id)?;
+        if let Some(view_id) = self.active_view_id() {
+            self.acknowledge_agent_attention_for_view(view_id.as_ref(), pane_id);
+        }
         Ok(())
     }
 
@@ -2359,7 +2372,23 @@ impl Mux {
             .insert(sub_id, Box::new(subscriber));
     }
 
+    fn should_skip_queued_notification(&self, notification: &MuxNotification) -> bool {
+        match notification {
+            MuxNotification::PaneOutput(pane_id) => {
+                !self.pending_pane_output_notifications.lock().insert(*pane_id)
+            }
+            _ => false,
+        }
+    }
+
+    fn clear_pending_notification(&self, notification: &MuxNotification) {
+        if let MuxNotification::PaneOutput(pane_id) = notification {
+            self.pending_pane_output_notifications.lock().remove(pane_id);
+        }
+    }
+
     pub fn notify(&self, notification: MuxNotification) {
+        self.clear_pending_notification(&notification);
         match &notification {
             MuxNotification::PaneOutput(pane_id) => self.record_agent_output(*pane_id),
             MuxNotification::Alert {
@@ -2376,6 +2405,9 @@ impl Mux {
         if let Some(mux) = Mux::try_get() {
             if mux.is_main_thread() {
                 mux.notify(notification);
+                return;
+            }
+            if mux.should_skip_queued_notification(&notification) {
                 return;
             }
         }
@@ -5225,5 +5257,24 @@ mod test {
             .unwrap();
 
         assert_eq!(*invalidations.lock(), 0);
+    }
+
+    #[test]
+    fn pane_output_notifications_coalesce_while_pending() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        assert!(!mux.should_skip_queued_notification(&MuxNotification::PaneOutput(1)));
+        assert!(mux.should_skip_queued_notification(&MuxNotification::PaneOutput(1)));
+        assert!(!mux.should_skip_queued_notification(&MuxNotification::PaneOutput(2)));
+
+        mux.clear_pending_notification(&MuxNotification::PaneOutput(1));
+
+        assert!(!mux.should_skip_queued_notification(&MuxNotification::PaneOutput(1)));
+        assert!(mux.should_skip_queued_notification(&MuxNotification::PaneOutput(1)));
     }
 }
