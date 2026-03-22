@@ -30,6 +30,10 @@ pub fn default_dpi() -> f64 {
     }
 }
 
+pub fn pump_spawn_queue() {
+    while spawn::SPAWN_QUEUE.run() {}
+}
+
 mod egl;
 
 pub use bitmaps::{BitmapImage, Image};
