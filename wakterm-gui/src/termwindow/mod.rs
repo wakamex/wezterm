@@ -3071,7 +3071,7 @@ impl TermWindow {
                 if self.tab_state(tab_id).overlay.is_none() {
                     let panes = tab.iter_panes();
                     if panes.iter().position(|p| p.index == *index).is_some() {
-                        tab.set_active_idx(*index);
+                        self.activate_local_pane_index(&tab, *index);
                     }
                 }
             }
@@ -3084,7 +3084,7 @@ impl TermWindow {
                 let tab_id = tab.tab_id();
 
                 if self.tab_state(tab_id).overlay.is_none() {
-                    tab.activate_pane_direction(*direction);
+                    self.activate_local_pane_direction(&tab, *direction);
                 }
             }
             TogglePaneZoomState => {
@@ -3513,6 +3513,31 @@ impl TermWindow {
                 self.get_active_mux_tab()
                     .and_then(|tab| tab.get_active_pane())
             })
+    }
+
+    fn activate_local_pane_index(&mut self, tab: &Arc<Tab>, pane_index: usize) {
+        let Some(pos) = tab.iter_panes().into_iter().find(|p| p.index == pane_index) else {
+            return;
+        };
+        let pane_id = pos.pane.pane_id();
+        tab.set_active_idx_no_notify(pane_index);
+
+        let mux = Mux::get();
+        if let Err(err) = mux.reconcile_focused_pane_for_current_identity(pane_id) {
+            log::error!("failed to reconcile focused pane {pane_id}: {err:#}");
+        }
+    }
+
+    fn activate_local_pane_direction(&mut self, tab: &Arc<Tab>, direction: PaneDirection) {
+        let before = tab.get_active_pane().map(|pane| pane.pane_id());
+        tab.activate_pane_direction_no_notify(direction);
+        let after = tab.get_active_pane().map(|pane| pane.pane_id());
+        if let Some(pane_id) = after.filter(|pane_id| Some(*pane_id) != before) {
+            let mux = Mux::get();
+            if let Err(err) = mux.reconcile_focused_pane_for_current_identity(pane_id) {
+                log::error!("failed to reconcile focused pane {pane_id}: {err:#}");
+            }
+        }
     }
 
     /// Returns a Pane that we can interact with; this will typically be

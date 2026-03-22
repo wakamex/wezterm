@@ -679,8 +679,11 @@ impl super::TermWindow {
                     match &event.kind {
                         WMEK::Press(_) => {
                             let mux = Mux::get();
-                            mux.get_active_tab_for_window_for_current_identity(self.mux_window_id)
-                                .map(|tab| tab.set_active_idx(pos.index));
+                            if let Some(tab) =
+                                mux.get_active_tab_for_window_for_current_identity(self.mux_window_id)
+                            {
+                                self.activate_local_pane_index(&tab, pos.index);
+                            }
 
                             pane = Arc::clone(&pos.pane);
                             is_click_to_focus_pane = true;
@@ -688,10 +691,11 @@ impl super::TermWindow {
                         WMEK::Move => {
                             if self.config.pane_focus_follows_mouse {
                                 let mux = Mux::get();
-                                mux.get_active_tab_for_window_for_current_identity(
+                                if let Some(tab) = mux.get_active_tab_for_window_for_current_identity(
                                     self.mux_window_id,
-                                )
-                                .map(|tab| tab.set_active_idx(pos.index));
+                                ) {
+                                    self.activate_local_pane_index(&tab, pos.index);
+                                }
 
                                 pane = Arc::clone(&pos.pane);
                                 context.invalidate();

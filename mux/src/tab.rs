@@ -937,7 +937,15 @@ impl Tab {
     /// intended direction, we take the pane that has the largest
     /// edge intersection.
     pub fn activate_pane_direction(&self, direction: PaneDirection) {
-        self.inner.lock().activate_pane_direction(direction)
+        self.inner
+            .lock()
+            .activate_pane_direction_impl(direction, NotifyMux::Yes)
+    }
+
+    pub fn activate_pane_direction_no_notify(&self, direction: PaneDirection) {
+        self.inner
+            .lock()
+            .activate_pane_direction_impl(direction, NotifyMux::No)
     }
 
     /// Returns an adjacent pane in the specified direction.
@@ -989,7 +997,11 @@ impl Tab {
     }
 
     pub fn set_active_idx(&self, pane_index: usize) {
-        self.inner.lock().set_active_idx(pane_index)
+        self.inner.lock().set_active_idx_impl(pane_index, NotifyMux::Yes)
+    }
+
+    pub fn set_active_idx_no_notify(&self, pane_index: usize) {
+        self.inner.lock().set_active_idx_impl(pane_index, NotifyMux::No)
     }
 
     /// Assigns the root pane.
@@ -1792,7 +1804,7 @@ impl TabInner {
         }
     }
 
-    fn activate_pane_direction(&mut self, direction: PaneDirection) {
+    fn activate_pane_direction_impl(&mut self, direction: PaneDirection, notify: NotifyMux) {
         if self.zoomed.is_some() {
             if !configuration().unzoom_on_switch_pane {
                 return;
@@ -1800,7 +1812,7 @@ impl TabInner {
             self.toggle_zoom();
         }
         if let Some(panel_idx) = self.get_pane_direction(direction, false) {
-            self.set_active_idx(panel_idx);
+            self.set_active_idx_impl(panel_idx, notify);
         }
         let mux = Mux::get();
         if let Some(window_id) = mux.window_containing_tab(self.id) {
@@ -2154,11 +2166,11 @@ impl TabInner {
         }
     }
 
-    fn set_active_idx(&mut self, pane_index: usize) {
+    fn set_active_idx_impl(&mut self, pane_index: usize, notify: NotifyMux) {
         let prior = self.get_active_pane();
         self.active = pane_index;
         self.recency.tag(pane_index);
-        self.advise_focus_change(prior, NotifyMux::Yes);
+        self.advise_focus_change(prior, notify);
     }
 
     fn assign_pane(&mut self, pane: &Arc<dyn Pane>) {
@@ -2219,7 +2231,7 @@ impl TabInner {
 
         // And update focus
         if keep_focus {
-            self.set_active_idx(pane_index);
+            self.set_active_idx_impl(pane_index, NotifyMux::Yes);
         } else {
             self.advise_focus_change(Some(pane), NotifyMux::Yes);
         }

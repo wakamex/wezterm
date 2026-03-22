@@ -177,7 +177,7 @@ impl PaneSelector {
             match self.mode {
                 PaneSelectMode::Activate => {
                     if panes.iter().position(|p| p.index == pane_index).is_some() {
-                        tab.set_active_idx(pane_index);
+                        term_window.activate_local_pane_index(&tab, pane_index);
                     }
                 }
                 PaneSelectMode::SwapWithActiveKeepFocus | PaneSelectMode::SwapWithActive => {
