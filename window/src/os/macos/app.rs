@@ -72,18 +72,7 @@ extern "C" fn application_did_finish_launching(this: &mut Object, _sel: Sel, _no
     log::debug!("application_did_finish_launching");
     unsafe {
         (*this).set_ivar("launched", YES);
-        let timer: id = msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: 0.01f64
-            target: this
-            selector: sel!(waktermPumpSpawnQueue:)
-            userInfo: nil
-            repeats: YES
-        ];
-        let (): () = msg_send![timer, setTolerance: 0.01f64];
     }
-}
-
-extern "C" fn wakterm_pump_spawn_queue(_this: &mut Object, _sel: Sel, _timer: *mut Object) {
-    while crate::spawn::SPAWN_QUEUE.run() {}
 }
 
 extern "C" fn application_open_untitled_file(
@@ -172,10 +161,6 @@ fn get_class() -> &'static Class {
             cls.add_method(
                 sel!(applicationDidFinishLaunching:),
                 application_did_finish_launching as extern "C" fn(&mut Object, Sel, *mut Object),
-            );
-            cls.add_method(
-                sel!(waktermPumpSpawnQueue:),
-                wakterm_pump_spawn_queue as extern "C" fn(&mut Object, Sel, *mut Object),
             );
             cls.add_method(
                 sel!(application:openFile:),

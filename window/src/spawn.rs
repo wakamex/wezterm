@@ -1,19 +1,9 @@
 #[cfg(windows)]
 use crate::os::windows::event::EventHandle;
 #[cfg(target_os = "macos")]
-use cocoa::appkit::NSApp;
-#[cfg(target_os = "macos")]
-use cocoa::base::{id, nil, NO};
-#[cfg(target_os = "macos")]
 use core_foundation::runloop::*;
-#[cfg(target_os = "macos")]
-use dispatch2::DispatchQueue;
-#[cfg(target_os = "macos")]
-use objc::*;
 use promise::spawn::{Runnable, SpawnFunc};
 use std::collections::VecDeque;
-#[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -35,8 +25,6 @@ pub(crate) struct SpawnQueue {
     spawned_funcs: Mutex<VecDeque<InstrumentedSpawnFunc>>,
     spawned_funcs_low_pri: Mutex<VecDeque<InstrumentedSpawnFunc>>,
 
-    #[cfg(target_os = "macos")]
-    scheduled: AtomicBool,
 
     #[cfg(windows)]
     pub event_handle: EventHandle,
@@ -224,7 +212,6 @@ impl SpawnQueue {
         Ok(Self {
             spawned_funcs,
             spawned_funcs_low_pri,
-            scheduled: AtomicBool::new(false),
         })
     }
 
@@ -233,6 +220,9 @@ impl SpawnQueue {
         _: CFRunLoopActivity,
         _: *mut std::ffi::c_void,
     ) {
+        // Process one task per run loop activity. The observer fires on
+        // every run loop phase, giving us frequent opportunities to drain
+        // without starving event processing.
         if SPAWN_QUEUE.run() {
             Self::queue_wakeup();
         }
@@ -244,39 +234,16 @@ impl SpawnQueue {
         }
     }
 
-    extern "C" fn drain_on_main_queue(_: *mut std::ffi::c_void) {
-        log::debug!("mac spawn queue dispatch drain fired");
-        // Process a single queued runnable per dispatch callback. We post
-        // one callback per enqueue, which avoids races where tasks are
-        // queued after `run()` observes an empty queue but before the
-        // previous callback clears its scheduling flag.
-        SPAWN_QUEUE.run();
-        SPAWN_QUEUE.scheduled.store(false, Ordering::Release);
-    }
-
     fn spawn_impl(&self, f: SpawnFunc, high_pri: bool) {
         self.queue_func(f, high_pri);
-        log::debug!("mac spawn queue enqueued task high_pri={high_pri}");
-        unsafe {
-            let app = NSApp();
-            let delegate: id = msg_send![app, delegate];
-            if delegate != nil {
-                let (): () = msg_send![
-                    delegate,
-                    performSelectorOnMainThread: sel!(waktermPumpSpawnQueue:)
-                    withObject: nil
-                    waitUntilDone: NO
-                ];
-            }
-        }
-        self.scheduled.store(true, Ordering::Release);
-        DispatchQueue::main().exec_async(|| Self::drain_on_main_queue(std::ptr::null_mut()));
+        // Wake the run loop so the CFRunLoopObserver fires promptly.
+        // This is the single drain mechanism: the observer processes
+        // one task per activity and re-wakes if more remain.
         Self::queue_wakeup();
     }
 
     fn run_impl(&self) -> bool {
         if let Some(func) = self.pop_func() {
-            log::debug!("mac spawn queue running queued task");
             func();
         }
         self.has_any_queued()

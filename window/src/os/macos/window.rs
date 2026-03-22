@@ -1952,9 +1952,10 @@ impl WindowView {
         log::trace!("do_command_by_selector {:?}", selector);
 
         if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
-            inner.ime_state = ImeDisposition::Continue;
-            inner.ime_last_event.take();
+            if let Ok(mut inner) = myself.inner.try_borrow_mut() {
+                inner.ime_state = ImeDisposition::Continue;
+                inner.ime_last_event.take();
+            }
         }
     }
 
@@ -2003,28 +2004,28 @@ impl WindowView {
             replacement_range
         );
         if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
+            if let Ok(mut inner) = myself.inner.try_borrow_mut() {
+                let key_is_down = inner.key_is_down.take().unwrap_or(true);
 
-            let key_is_down = inner.key_is_down.take().unwrap_or(true);
+                let key = KeyCode::composed(s);
 
-            let key = KeyCode::composed(s);
+                let event = KeyEvent {
+                    key,
+                    modifiers: Modifiers::NONE,
+                    leds: KeyboardLedStatus::empty(),
+                    repeat_count: 1,
+                    key_is_down,
+                    raw: None,
+                };
 
-            let event = KeyEvent {
-                key,
-                modifiers: Modifiers::NONE,
-                leds: KeyboardLedStatus::empty(),
-                repeat_count: 1,
-                key_is_down,
-                raw: None,
-            };
-
-            inner.ime_text.clear();
-            inner
-                .events
-                .dispatch(WindowEvent::AdviseDeadKeyStatus(DeadKeyStatus::None));
-            inner.ime_last_event.replace(event.clone());
-            inner.events.dispatch(WindowEvent::KeyEvent(event));
-            inner.ime_state = ImeDisposition::Acted;
+                inner.ime_text.clear();
+                inner
+                    .events
+                    .dispatch(WindowEvent::AdviseDeadKeyStatus(DeadKeyStatus::None));
+                inner.ime_last_event.replace(event.clone());
+                inner.events.dispatch(WindowEvent::KeyEvent(event));
+                inner.ime_state = ImeDisposition::Acted;
+            }
         }
     }
 
@@ -2043,7 +2044,9 @@ impl WindowView {
             replacement_range
         );
         if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
+            let Ok(mut inner) = myself.inner.try_borrow_mut() else {
+                return;
+            };
             inner.ime_text = s.to_string();
 
             /*
@@ -2070,7 +2073,9 @@ impl WindowView {
     extern "C" fn unmark_text(this: &mut Object, _sel: Sel) {
         log::trace!("unmarkText");
         if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
+            let Ok(mut inner) = myself.inner.try_borrow_mut() else {
+                return;
+            };
             // FIXME: docs say to insert the text here,
             // but iterm doesn't... and we've never seen
             // this get called so far?
@@ -2159,10 +2164,9 @@ impl WindowView {
     extern "C" fn view_did_change_effective_appearance(this: &mut Object, _sel: Sel) {
         if let Some(this) = Self::get_this(this) {
             let appearance = Connection::get().unwrap().get_appearance();
-            this.inner
-                .borrow_mut()
-                .events
-                .dispatch(WindowEvent::AppearanceChanged(appearance));
+            if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                inner.events.dispatch(WindowEvent::AppearanceChanged(appearance));
+            }
         }
     }
 
@@ -2170,7 +2174,9 @@ impl WindowView {
         let frame = unsafe { NSView::frame(this as *mut _) };
 
         if let Some(this) = Self::get_this(this) {
-            let mut inner = this.inner.borrow_mut();
+            let Ok(mut inner) = this.inner.try_borrow_mut() else {
+                return;
+            };
             if let Some(ref view) = inner.view_id {
                 let view = view.load();
                 if view.is_null() {
@@ -2201,10 +2207,9 @@ impl WindowView {
         }
 
         if let Some(this) = Self::get_this(this) {
-            this.inner
-                .borrow_mut()
-                .events
-                .dispatch(WindowEvent::CloseRequested);
+            if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                inner.events.dispatch(WindowEvent::CloseRequested);
+            }
             NO
         } else {
             YES
@@ -2249,20 +2254,18 @@ impl WindowView {
 
     extern "C" fn did_become_key(this: &mut Object, _sel: Sel, _id: id) {
         if let Some(this) = Self::get_this(this) {
-            this.inner
-                .borrow_mut()
-                .events
-                .dispatch(WindowEvent::FocusChanged(true));
+            if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                inner.events.dispatch(WindowEvent::FocusChanged(true));
+            }
             this.update_application_presentation(true);
         }
     }
 
     extern "C" fn did_resign_key(this: &mut Object, _sel: Sel, _id: id) {
         if let Some(this) = Self::get_this(this) {
-            this.inner
-                .borrow_mut()
-                .events
-                .dispatch(WindowEvent::FocusChanged(false));
+            if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                inner.events.dispatch(WindowEvent::FocusChanged(false));
+            }
             this.update_application_presentation(true);
         }
     }
@@ -2295,10 +2298,9 @@ impl WindowView {
         match action {
             Some(RepresentedItem::KeyAssignment(action)) => {
                 if let Some(this) = Self::get_this(this) {
-                    this.inner
-                        .borrow_mut()
-                        .events
-                        .dispatch(WindowEvent::PerformKeyAssignment(action));
+                    if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                        inner.events.dispatch(WindowEvent::PerformKeyAssignment(action));
+                    }
                 }
             }
             None => {}
@@ -2308,14 +2310,14 @@ impl WindowView {
     extern "C" fn window_will_close(this: &mut Object, _sel: Sel, _id: id) {
         if let Some(this) = Self::get_this(this) {
             // Advise the window of its impending death
-            this.inner
-                .borrow_mut()
-                .events
-                .dispatch(WindowEvent::Destroyed);
-            this.update_application_presentation(false);
-            let conn = Connection::get().unwrap();
-            let window_id = this.inner.borrow_mut().window_id;
-            conn.windows.borrow_mut().remove(&window_id);
+            if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                inner.events.dispatch(WindowEvent::Destroyed);
+                let window_id = inner.window_id;
+                drop(inner);
+                this.update_application_presentation(false);
+                let conn = Connection::get().unwrap();
+                conn.windows.borrow_mut().remove(&window_id);
+            }
         }
     }
 
@@ -2348,8 +2350,9 @@ impl WindowView {
         };
 
         if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
-            inner.events.dispatch(WindowEvent::MouseEvent(event));
+            if let Ok(mut inner) = myself.inner.try_borrow_mut() {
+                inner.events.dispatch(WindowEvent::MouseEvent(event));
+            }
         }
     }
 
@@ -2395,7 +2398,9 @@ impl WindowView {
         let mut horz_delta = unsafe { nsevent.scrollingDeltaX() } / scale;
 
         if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
+            let Ok(mut inner) = myself.inner.try_borrow_mut() else {
+                return;
+            };
 
             let elapsed = inner.last_wheel.elapsed();
 
@@ -2468,11 +2473,9 @@ impl WindowView {
 
     extern "C" fn mouse_exited(this: &mut Object, _sel: Sel, _nsevent: id) {
         if let Some(myself) = Self::get_this(this) {
-            myself
-                .inner
-                .borrow_mut()
-                .events
-                .dispatch(WindowEvent::MouseLeave);
+            if let Ok(mut inner) = myself.inner.try_borrow_mut() {
+                inner.events.dispatch(WindowEvent::MouseLeave);
+            }
         }
     }
 
@@ -2547,10 +2550,11 @@ impl WindowView {
             handled: raw_key_handled.clone(),
         };
         if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
-            inner
-                .events
-                .dispatch(WindowEvent::RawKeyEvent(raw_key_event.clone()));
+            if let Ok(mut inner) = myself.inner.try_borrow_mut() {
+                inner
+                    .events
+                    .dispatch(WindowEvent::RawKeyEvent(raw_key_event.clone()));
+            }
         }
 
         if raw_key_handled.is_handled() {
@@ -2559,7 +2563,9 @@ impl WindowView {
         }
 
         let chars = if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
+            let Ok(mut inner) = myself.inner.try_borrow_mut() else {
+                return;
+            };
 
             if chars.is_empty() || inner.dead_pending.is_some() {
                 // Dead key!
@@ -2649,10 +2655,11 @@ impl WindowView {
 
         if key_is_down && use_ime && forward_to_ime {
             if let Some(myself) = Self::get_this(this) {
-                let mut inner = myself.inner.borrow_mut();
-                inner.key_is_down.replace(key_is_down);
-                inner.ime_state = ImeDisposition::None;
-                inner.ime_text.clear();
+                if let Ok(mut inner) = myself.inner.try_borrow_mut() {
+                    inner.key_is_down.replace(key_is_down);
+                    inner.ime_state = ImeDisposition::None;
+                    inner.ime_text.clear();
+                }
             }
 
             unsafe {
@@ -2660,7 +2667,9 @@ impl WindowView {
                 let _: () = msg_send![this, interpretKeyEvents: array];
 
                 if let Some(myself) = Self::get_this(this) {
-                    let mut inner = myself.inner.borrow_mut();
+                    let Ok(mut inner) = myself.inner.try_borrow_mut() else {
+                        return;
+                    };
                     log::trace!(
                         "IME state: {:?}, last_event: {:?}",
                         inner.ime_state,
@@ -2822,13 +2831,14 @@ impl WindowView {
             );
 
             if let Some(myself) = Self::get_this(this) {
-                let mut inner = myself.inner.borrow_mut();
-                // Don't clear the last IME event when a key is up otherwise it
-                // could mess up the succeeding key repeats.
-                if key_is_down {
-                    inner.ime_last_event.take();
+                if let Ok(mut inner) = myself.inner.try_borrow_mut() {
+                    // Don't clear the last IME event when a key is up otherwise it
+                    // could mess up the succeeding key repeats.
+                    if key_is_down {
+                        inner.ime_last_event.take();
+                    }
+                    inner.events.dispatch(WindowEvent::KeyEvent(event));
                 }
-                inner.events.dispatch(WindowEvent::KeyEvent(event));
             }
         }
     }
@@ -2873,10 +2883,11 @@ impl WindowView {
         };
 
         if let Some(myself) = Self::get_this(this) {
-            let mut inner = myself.inner.borrow_mut();
-            inner
-                .events
-                .dispatch(WindowEvent::AdviseModifiersLedStatus(modifiers, leds));
+            if let Ok(mut inner) = myself.inner.try_borrow_mut() {
+                inner
+                    .events
+                    .dispatch(WindowEvent::AdviseModifiersLedStatus(modifiers, leds));
+            }
         }
     }
 
@@ -2891,34 +2902,34 @@ impl WindowView {
     extern "C" fn did_change_screen(this: &mut Object, _sel: Sel, _notification: id) {
         log::trace!("did_change_screen");
         if let Some(this) = Self::get_this(this) {
-            // Just set a flag; we don't want to react immediately
-            // as this even fires as part of a live move and the
-            // resize flow may try to re-position the window to
-            // the wrong place.
-            this.inner.borrow_mut().screen_changed = true;
+            if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                inner.screen_changed = true;
+            }
         }
     }
 
     extern "C" fn will_start_live_resize(this: &mut Object, _sel: Sel, _notification: id) {
         if let Some(this) = Self::get_this(this) {
-            let mut inner = this.inner.borrow_mut();
-            inner.live_resizing = true;
+            if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                inner.live_resizing = true;
+            }
         }
     }
 
     extern "C" fn did_end_live_resize(this: &mut Object, _sel: Sel, _notification: id) {
         if let Some(this) = Self::get_this(this) {
-            let mut inner = this.inner.borrow_mut();
-            inner.live_resizing = false;
+            if let Ok(mut inner) = this.inner.try_borrow_mut() {
+                inner.live_resizing = false;
+            }
         }
     }
 
     extern "C" fn did_resize(this: &mut Object, _sel: Sel, _notification: id) {
         if let Some(this) = Self::get_this(this) {
-            let inner = this.inner.borrow_mut();
-
-            if let Some(gl_context_pair) = inner.gl_context_pair.as_ref() {
-                gl_context_pair.backend.update();
+            if let Ok(inner) = this.inner.try_borrow_mut() {
+                if let Some(gl_context_pair) = inner.gl_context_pair.as_ref() {
+                    gl_context_pair.backend.update();
+                }
             }
         }
 
@@ -2927,7 +2938,9 @@ impl WindowView {
         let width = backing_frame.size.width;
         let height = backing_frame.size.height;
         if let Some(this) = Self::get_this(this) {
-            let mut inner = this.inner.borrow_mut();
+            let Ok(mut inner) = this.inner.try_borrow_mut() else {
+                return;
+            };
 
             // This is a little gross; ideally we'd call
             // WindowInner:is_fullscreen to determine this, but
@@ -3087,34 +3100,35 @@ impl WindowView {
     extern "C" fn draw_rect(view: &mut Object, sel: Sel, _dirty_rect: NSRect) {
         let view_id = view as *mut Object as id;
         if let Some(this) = Self::get_this(view) {
-            let mut inner = this.inner.borrow_mut();
+            match this.inner.try_borrow_mut() {
+                Ok(mut inner) => {
+                    if inner.screen_changed {
+                        inner.screen_changed = false;
+                        drop(inner);
+                        Self::did_resize(view, sel, nil);
+                        return;
+                    }
 
-            if inner.screen_changed {
-                // If the screen resolution changed (which can also
-                // happen if the window was dragged to another monitor
-                // with different dpi), then we treat this as a resize
-                // event that will in turn trigger an invalidation
-                // and a repaint.
-                inner.screen_changed = false;
-                drop(inner);
-                Self::did_resize(view, sel, nil);
-                return;
+                    inner.events.dispatch(WindowEvent::NeedRepaint);
+                    inner.invalidated = false;
+                    inner.paint_throttled = false;
+                }
+                Err(_) => {
+                    // Inner is already borrowed; schedule another
+                    // display pass rather than panicking across FFI.
+                    unsafe {
+                        let () = msg_send![view_id, setNeedsDisplay: YES];
+                    }
+                }
             }
-
-            // The paint throttle has proven unreliable on macOS in the SSHMUX
-            // attach path: the first frame is rendered, later invalidations
-            // accumulate, and the window appears frozen because subsequent
-            // NeedRepaint events never fire. Favor correctness here and allow
-            // each invalidation to trigger a repaint directly.
-            inner.events.dispatch(WindowEvent::NeedRepaint);
-            inner.invalidated = false;
-            inner.paint_throttled = false;
         }
     }
 
     extern "C" fn dragging_entered(this: &mut Object, _: Sel, sender: id) -> BOOL {
         if let Some(this) = Self::get_this(this) {
-            let mut inner = this.inner.borrow_mut();
+            let Ok(mut inner) = this.inner.try_borrow_mut() else {
+                return NO;
+            };
 
             let pb: id = unsafe { msg_send![sender, draggingPasteboard] };
             if pb.is_null() {
@@ -3140,7 +3154,9 @@ impl WindowView {
 
     extern "C" fn perform_drag_operation(this: &mut Object, _: Sel, sender: id) -> BOOL {
         if let Some(this) = Self::get_this(this) {
-            let mut inner = this.inner.borrow_mut();
+            let Ok(mut inner) = this.inner.try_borrow_mut() else {
+                return NO;
+            };
 
             let pb: id = unsafe { msg_send![sender, draggingPasteboard] };
             if pb.is_null() {
