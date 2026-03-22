@@ -16,7 +16,7 @@ use mux::Mux;
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod};
 use openssl::x509::X509;
 use portable_pty::Child;
-use smol::channel::{bounded, unbounded, Receiver, Sender};
+use smol::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use smol::prelude::*;
 use smol::{block_on, Async};
 use std::collections::HashMap;
@@ -461,7 +461,38 @@ async fn client_thread_async(
 
     let mut stream = reconnectable.take_stream().unwrap();
 
+    async fn send_queued_pdu(
+        stream: &mut Box<dyn AsyncReadAndWrite>,
+        promises: &mut Promises,
+        next_serial: &mut u64,
+        pdu: Pdu,
+        promise: Sender<anyhow::Result<Pdu>>,
+    ) -> anyhow::Result<()> {
+        let serial = *next_serial;
+        *next_serial += 1;
+        promises.map.insert(serial, promise);
+
+        pdu.encode_async(stream, serial)
+            .await
+            .context("encoding a PDU to send to the server")?;
+        stream.flush().await.context("flushing PDU to server")?;
+        Ok(())
+    }
+
     loop {
+        match rx.try_recv() {
+            Ok(ReaderMessage::SendPdu { pdu, promise }) => {
+                send_queued_pdu(&mut stream, &mut promises, &mut next_serial, pdu, promise)
+                    .await?;
+                continue;
+            }
+            Ok(ReaderMessage::Readable) => {}
+            Err(TryRecvError::Closed) => {
+                return Err(NotReconnectableError::ClientWasDestroyed.into());
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+
         let rx_msg = rx.recv();
         let wait_for_read = stream
             .wait_for_readable()
@@ -469,14 +500,8 @@ async fn client_thread_async(
 
         match smol::future::or(rx_msg, wait_for_read).await {
             Ok(ReaderMessage::SendPdu { pdu, promise }) => {
-                let serial = next_serial;
-                next_serial += 1;
-                promises.map.insert(serial, promise);
-
-                pdu.encode_async(&mut stream, serial)
-                    .await
-                    .context("encoding a PDU to send to the server")?;
-                stream.flush().await.context("flushing PDU to server")?;
+                send_queued_pdu(&mut stream, &mut promises, &mut next_serial, pdu, promise)
+                    .await?;
             }
             Ok(ReaderMessage::Readable) => {
                 match Pdu::decode_async(&mut stream, Some(next_serial)).await {
