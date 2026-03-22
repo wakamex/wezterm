@@ -172,7 +172,6 @@ impl crate::TermWindow {
 
         let panes = self.get_panes_to_render();
         log::debug!("paint_pass panes_to_render={}", panes.len());
-        let focused = self.focused.is_some();
         let window_is_transparent =
             !self.window_background.is_empty() || self.config.window_background_opacity != 1.0;
 
@@ -261,15 +260,6 @@ impl crate::TermWindow {
             );
             if pos.is_active {
                 self.update_text_cursor(&pos);
-                if focused {
-                    log::debug!("paint_pass pane {} advising focus", pos.pane.pane_id());
-                    pos.pane.advise_focus();
-                    log::debug!(
-                        "paint_pass pane {} recording focus for identity",
-                        pos.pane.pane_id()
-                    );
-                    mux::Mux::get().record_focus_for_current_identity(pos.pane.pane_id());
-                }
             }
             self.paint_pane(&pos, &mut layers).context("paint_pane")?;
             log::debug!("paint_pass pane complete pane_id={}", pos.pane.pane_id());

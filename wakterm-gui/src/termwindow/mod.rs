@@ -572,6 +572,9 @@ impl TermWindow {
         window.invalidate();
 
         if let Some(pane) = self.get_active_pane_or_overlay() {
+            if focused {
+                Mux::get().record_focus_for_current_identity(pane.pane_id());
+            }
             pane.focus_changed(focused);
         }
 
