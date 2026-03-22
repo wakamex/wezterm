@@ -1,15 +1,21 @@
 #[cfg(windows)]
 use crate::os::windows::event::EventHandle;
 #[cfg(target_os = "macos")]
+use cocoa::appkit::NSApp;
+#[cfg(target_os = "macos")]
+use cocoa::base::{id, nil, NO};
+#[cfg(target_os = "macos")]
 use core_foundation::runloop::*;
 #[cfg(target_os = "macos")]
 use dispatch2::DispatchQueue;
+#[cfg(target_os = "macos")]
+use objc::*;
 use promise::spawn::{Runnable, SpawnFunc};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 #[cfg(all(unix, not(target_os = "macos")))]
 use {
     filedescriptor::{FileDescriptor, Pipe},
@@ -257,6 +263,18 @@ impl SpawnQueue {
     fn spawn_impl(&self, f: SpawnFunc, high_pri: bool) {
         self.queue_func(f, high_pri);
         log::debug!("mac spawn queue enqueued task high_pri={high_pri}");
+        unsafe {
+            let app = NSApp();
+            let delegate: id = msg_send![app, delegate];
+            if delegate != nil {
+                let (): () = msg_send![
+                    delegate,
+                    performSelectorOnMainThread: sel!(waktermPumpSpawnQueue:)
+                    withObject: nil
+                    waitUntilDone: NO
+                ];
+            }
+        }
         if !self.scheduled.swap(true, Ordering::AcqRel) {
             DispatchQueue::main().exec_async(|| Self::drain_on_main_queue(std::ptr::null_mut()));
         }
