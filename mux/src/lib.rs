@@ -1865,12 +1865,6 @@ impl Mux {
         self.get_active_pane_for_tab_for_client(view_id.as_ref(), window_id, tab_id)
     }
 
-    pub fn record_focus_for_current_identity(&self, pane_id: PaneId) {
-        if let Some(ident) = self.identity.read().as_ref() {
-            self.record_focus_for_client(ident, pane_id);
-        }
-    }
-
     pub fn resolve_focused_pane(
         &self,
         client_id: &ClientId,
@@ -1880,6 +1874,9 @@ impl Mux {
         Some((domain, window, tab, pane_id))
     }
 
+    /// Heavy per-client focus path.
+    /// Updates current focus bookkeeping, clears per-view attention,
+    /// and synthesizes pane focus callbacks.
     pub fn record_focus_for_client(&self, client_id: &ClientId, pane_id: PaneId) {
         let mut prior = None;
         let mut view_id = None;
@@ -3725,7 +3722,8 @@ mod test {
             pane_b.pane_id(),
         )
         .unwrap();
-        mux.record_focus_for_client(client_a.as_ref(), pane_b.pane_id());
+        mux.set_focused_pane_for_client(client_a.as_ref(), pane_b.pane_id())
+            .unwrap();
         mux.unregister_client(client_a.as_ref());
 
         let window_b = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
@@ -4754,7 +4752,9 @@ mod test {
             "🤖 scrape"
         );
 
-        mux.record_focus_for_client(client_a.as_ref(), pane_id);
+        mux.set_focused_pane_for_client(client_a.as_ref(), pane_id)
+            .unwrap();
+        mux.acknowledge_agent_attention_for_view(view_a.as_ref(), pane_id);
 
         assert_eq!(
             mux.effective_tab_title_for_view(view_a.as_ref(), tab.tab_id()),
