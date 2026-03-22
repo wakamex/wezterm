@@ -3015,6 +3015,31 @@ impl WindowView {
         )
     }
 
+    extern "C" fn wakterm_finish_paint_throttle(view: &mut Object, _sel: Sel, _timer: id) {
+        if let Some(this) = Self::get_this(view) {
+            match this.inner.try_borrow_mut() {
+                Ok(mut state) => {
+                    state.paint_throttled = false;
+                    if state.invalidated {
+                        unsafe {
+                            let () = msg_send![view, setNeedsDisplay: YES];
+                        }
+                    }
+                }
+                Err(_) => unsafe {
+                    let timer: id =
+                        msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: 0.001f64
+                            target: view
+                            selector: sel!(waktermFinishPaintThrottle:)
+                            userInfo: nil
+                            repeats: NO
+                        ];
+                    let (): () = msg_send![timer, setTolerance: 0.001f64];
+                },
+            }
+        }
+    }
+
     extern "C" fn draw_layer_in_context(
         _view: &mut Object,
         _sel: Sel,
@@ -3074,25 +3099,18 @@ impl WindowView {
                 inner.invalidated = false;
                 inner.paint_throttled = true;
 
-                let window_id = inner.window_id;
                 let max_fps = inner.config.max_fps;
-                promise::spawn::spawn(async move {
-                    async_io::Timer::after(std::time::Duration::from_millis(1000 / max_fps as u64))
-                        .await;
-                    Connection::with_window_inner(window_id, move |inner| {
-                        if let Some(window_view) = WindowView::get_this(unsafe { &**inner.view }) {
-                            let mut state = window_view.inner.borrow_mut();
-                            state.paint_throttled = false;
-                            if state.invalidated {
-                                unsafe {
-                                    let () = msg_send![*inner.view, setNeedsDisplay: YES];
-                                }
-                            }
-                        }
-                        Ok(())
-                    });
-                })
-                .detach();
+                let interval = 1.0 / max_fps as f64;
+                unsafe {
+                    let timer: id =
+                        msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: interval
+                            target: view
+                            selector: sel!(waktermFinishPaintThrottle:)
+                            userInfo: nil
+                            repeats: NO
+                        ];
+                    let (): () = msg_send![timer, setTolerance: interval];
+                }
             }
         }
     }
@@ -3244,6 +3262,11 @@ impl WindowView {
             cls.add_method(
                 sel!(displayLayer:),
                 Self::display_layer as extern "C" fn(&mut Object, Sel, id),
+            );
+
+            cls.add_method(
+                sel!(waktermFinishPaintThrottle:),
+                Self::wakterm_finish_paint_throttle as extern "C" fn(&mut Object, Sel, id),
             );
 
             cls.add_method(
