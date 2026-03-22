@@ -1105,25 +1105,37 @@ impl Domain for ClientDomain {
                 let (tx, rx) = smol::channel::bounded(1);
                 std::thread::spawn(move || {
                     let result = (|| -> anyhow::Result<Client> {
-                    match &config {
-                        ClientDomainConfig::Unix(unix) => {
-                            let initial = true;
-                            let no_auto_start = false;
-                            Client::new_unix_domain(
-                                Some(domain_id),
-                                unix,
-                                initial,
-                                &mut cloned_ui,
-                                no_auto_start,
-                            )
+                        match &config {
+                            ClientDomainConfig::Unix(unix) => {
+                                let initial = true;
+                                let no_auto_start = false;
+                                Client::new_unix_domain(
+                                    Some(domain_id),
+                                    unix,
+                                    initial,
+                                    &mut cloned_ui,
+                                    no_auto_start,
+                                )
+                            }
+                            ClientDomainConfig::Tls(tls) => {
+                                Client::new_tls(domain_id, tls, &mut cloned_ui)
+                            }
+                            ClientDomainConfig::Ssh(ssh) => {
+                                Client::new_ssh(domain_id, ssh, &mut cloned_ui)
+                            }
                         }
-                        ClientDomainConfig::Tls(tls) => {
-                            Client::new_tls(domain_id, tls, &mut cloned_ui)
-                        }
-                        ClientDomainConfig::Ssh(ssh) => Client::new_ssh(domain_id, ssh, &mut cloned_ui),
-                    }
                     })();
-                    let _ = tx.try_send(result);
+                    cloned_ui.output_str("Client construction thread finished\r\n");
+                    smol::block_on(async move {
+                        if tx.send(result).await.is_ok() {
+                            log::debug!("client construction result sent for domain {}", domain_id);
+                        } else {
+                            log::debug!(
+                                "client construction receiver dropped before result for domain {}",
+                                domain_id
+                            );
+                        }
+                    });
                 });
                 let client: Client = async {
                     let result = rx.recv().await.map_err(anyhow::Error::from)?;
@@ -1146,6 +1158,7 @@ impl Domain for ClientDomain {
                     );
                     err
                 })?;
+                ui.output_str("Client construction handoff received\r\n");
                 log::debug!(
                     "client construction completed in {:?}; starting version check",
                     start.elapsed()
