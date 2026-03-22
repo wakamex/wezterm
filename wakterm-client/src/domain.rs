@@ -1116,6 +1116,7 @@ impl Domain for ClientDomain {
                     ClientDomainConfig::Ssh(ssh) => Client::new_ssh(domain_id, ssh, &mut cloned_ui),
                 })
                 .await?;
+                log::debug!("client construction completed; starting version check");
 
                 ui.output_str("Checking server version\n");
                 client.verify_version_compat(&ui).await?;

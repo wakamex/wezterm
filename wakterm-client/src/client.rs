@@ -840,11 +840,14 @@ impl Reconnectable {
             _ => {}
         });
 
+        log::debug!("ssh proxy exec returned; constructing Async SshStream");
         let stream: Box<dyn AsyncReadAndWrite> = Box::new(Async::new(SshStream {
             stdin: exec.stdin,
             stdout: exec.stdout,
         })?);
+        log::debug!("ssh Async SshStream constructed; storing stream");
         self.stream.replace(stream);
+        log::debug!("ssh_connect completed");
         Ok(())
     }
 
