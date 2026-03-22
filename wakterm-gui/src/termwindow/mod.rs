@@ -1086,6 +1086,9 @@ impl TermWindow {
     }
 
     fn do_paint(&mut self, window: &Window) -> bool {
+        #[cfg(target_os = "macos")]
+        while ::window::spawn::SPAWN_QUEUE.run() {}
+
         let gl = match self.gl.as_ref() {
             Some(gl) => gl,
             None => return false,
@@ -1110,6 +1113,9 @@ impl TermWindow {
     }
 
     fn do_paint_webgpu(&mut self) -> anyhow::Result<bool> {
+        #[cfg(target_os = "macos")]
+        while ::window::spawn::SPAWN_QUEUE.run() {}
+
         self.webgpu.as_mut().unwrap().resize(self.dimensions);
         match self.do_paint_webgpu_impl() {
             Ok(ok) => Ok(ok),
