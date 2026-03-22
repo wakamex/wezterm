@@ -926,6 +926,9 @@ impl TermWindow {
         event: WindowEvent,
         window: &Window,
     ) -> anyhow::Result<bool> {
+        #[cfg(target_os = "macos")]
+        ::window::pump_spawn_queue();
+
         log::debug!("{event:?}");
         match event {
             WindowEvent::Destroyed => {
