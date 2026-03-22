@@ -2,6 +2,8 @@
 use crate::os::windows::event::EventHandle;
 #[cfg(target_os = "macos")]
 use core_foundation::runloop::*;
+#[cfg(target_os = "macos")]
+use dispatch2::DispatchQueue;
 use promise::spawn::{Runnable, SpawnFunc};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -236,10 +238,14 @@ impl SpawnQueue {
 
     fn spawn_impl(&self, f: SpawnFunc, high_pri: bool) {
         self.queue_func(f, high_pri);
-        // Wake the run loop so the CFRunLoopObserver fires promptly.
-        // This is the single drain mechanism: the observer processes
-        // one task per activity and re-wakes if more remain.
-        Self::queue_wakeup();
+        // Dispatch a single-task drain onto the main queue. GCD
+        // integrates with the run loop and ensures the block runs
+        // promptly without starving event processing.  The
+        // CFRunLoopObserver acts as a secondary sweep for any tasks
+        // that arrive while the run loop is already active.
+        DispatchQueue::main().exec_async(|| {
+            SPAWN_QUEUE.run();
+        });
     }
 
     fn run_impl(&self) -> bool {
