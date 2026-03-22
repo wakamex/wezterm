@@ -2040,6 +2040,16 @@ impl Mux {
         window_id: WindowId,
         tab_id: TabId,
     ) -> anyhow::Result<()> {
+        self.set_active_tab_for_client_view_impl(view_id, window_id, tab_id, true)
+    }
+
+    fn set_active_tab_for_client_view_impl(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+        tab_id: TabId,
+        notify: bool,
+    ) -> anyhow::Result<()> {
         let tab = self
             .get_tab(tab_id)
             .ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
@@ -2058,7 +2068,9 @@ impl Mux {
         Self::seed_view_state_for_tab(window_state, &tab);
         drop(client_views);
 
-        self.notify(MuxNotification::WindowInvalidated(window_id));
+        if notify {
+            self.notify(MuxNotification::WindowInvalidated(window_id));
+        }
         Ok(())
     }
 
@@ -2073,12 +2085,38 @@ impl Mux {
         self.set_active_tab_for_client_view(view_id.as_ref(), window_id, tab_id)
     }
 
+    /// Updates current client view state without invalidating the window.
+    /// This is intended for attach-time reconciliation where the caller is
+    /// already synchronizing the pane tree and wants to avoid re-entrant GUI
+    /// notifications while wiring up local state.
+    pub fn seed_active_tab_for_current_identity(
+        &self,
+        window_id: WindowId,
+        tab_id: TabId,
+    ) -> anyhow::Result<()> {
+        let view_id = self
+            .active_view_id()
+            .ok_or_else(|| anyhow!("no current client identity"))?;
+        self.set_active_tab_for_client_view_impl(view_id.as_ref(), window_id, tab_id, false)
+    }
+
     pub fn set_active_pane_for_client_view(
         &self,
         view_id: &ClientViewId,
         window_id: WindowId,
         tab_id: TabId,
         pane_id: PaneId,
+    ) -> anyhow::Result<()> {
+        self.set_active_pane_for_client_view_impl(view_id, window_id, tab_id, pane_id, true)
+    }
+
+    fn set_active_pane_for_client_view_impl(
+        &self,
+        view_id: &ClientViewId,
+        window_id: WindowId,
+        tab_id: TabId,
+        pane_id: PaneId,
+        notify: bool,
     ) -> anyhow::Result<()> {
         let (_domain_id, pane_window_id, pane_tab_id) = self
             .resolve_pane_id(pane_id)
@@ -2099,7 +2137,9 @@ impl Mux {
         Self::seed_view_state_for_tab(window_state, &tab);
         drop(client_views);
 
-        self.notify(MuxNotification::WindowInvalidated(window_id));
+        if notify {
+            self.notify(MuxNotification::WindowInvalidated(window_id));
+        }
         Ok(())
     }
 
@@ -2113,6 +2153,28 @@ impl Mux {
             .active_view_id()
             .ok_or_else(|| anyhow!("no current client identity"))?;
         self.set_active_pane_for_client_view(view_id.as_ref(), window_id, tab_id, pane_id)
+    }
+
+    /// Updates current client view state without invalidating the window.
+    /// This is intended for attach-time reconciliation where the caller is
+    /// already synchronizing the pane tree and wants to avoid re-entrant GUI
+    /// notifications while wiring up local state.
+    pub fn seed_active_pane_for_current_identity(
+        &self,
+        window_id: WindowId,
+        tab_id: TabId,
+        pane_id: PaneId,
+    ) -> anyhow::Result<()> {
+        let view_id = self
+            .active_view_id()
+            .ok_or_else(|| anyhow!("no current client identity"))?;
+        self.set_active_pane_for_client_view_impl(
+            view_id.as_ref(),
+            window_id,
+            tab_id,
+            pane_id,
+            false,
+        )
     }
 
     pub fn register_client(&self, client_id: Arc<ClientId>, view_id: Arc<ClientViewId>) {
@@ -4979,5 +5041,50 @@ mod test {
                 .and_then(|tab| tab.active_pane_id),
             Some(pane_id)
         );
+    }
+
+    #[test]
+    fn seed_active_focus_for_current_identity_does_not_invalidate_window() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let (client_a, _view_a) = register_test_client(&mux, "seed-focus-view");
+        let _identity = mux.with_identity(Some(client_a));
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new(61, size, domain.id);
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let invalidations = Arc::new(Mutex::new(0usize));
+        let invalidations_for_sub = Arc::clone(&invalidations);
+        mux.subscribe(move |notification| {
+            if matches!(notification, MuxNotification::WindowInvalidated(id) if id == window_id) {
+                *invalidations_for_sub.lock() += 1;
+            }
+            true
+        });
+
+        mux.seed_active_tab_for_current_identity(window_id, tab.tab_id())
+            .unwrap();
+        mux.seed_active_pane_for_current_identity(window_id, tab.tab_id(), pane_id)
+            .unwrap();
+
+        assert_eq!(*invalidations.lock(), 0);
     }
 }

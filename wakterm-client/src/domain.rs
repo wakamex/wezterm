@@ -893,7 +893,7 @@ impl ClientDomain {
                 local_tab_id
             );
             if mux
-                .set_active_tab_for_current_identity(local_window_id, local_tab_id)
+                .seed_active_tab_for_current_identity(local_window_id, local_tab_id)
                 .is_err()
             {
                 continue;
@@ -918,7 +918,7 @@ impl ClientDomain {
                         local_tab_id,
                         local_active_pane_id
                     );
-                    let _ = mux.set_active_pane_for_current_identity(
+                    let _ = mux.seed_active_pane_for_current_identity(
                         local_window_id,
                         local_tab_id,
                         local_active_pane_id,
@@ -946,10 +946,10 @@ impl ClientDomain {
                 remote_window_id
             );
             if mux
-                .set_active_tab_for_current_identity(local_window_id, local_tab_id)
+                .seed_active_tab_for_current_identity(local_window_id, local_tab_id)
                 .is_ok()
             {
-                let _ = mux.set_active_pane_for_current_identity(
+                let _ = mux.seed_active_pane_for_current_identity(
                     local_window_id,
                     local_tab_id,
                     local_pane_id,
