@@ -1364,6 +1364,8 @@ mod test {
         title: String,
         foreground_process_name: Option<String>,
         panic_on_process_name: bool,
+        panic_on_title: bool,
+        panic_on_working_dir: bool,
     }
 
     impl TestPane {
@@ -1374,6 +1376,8 @@ mod test {
                 title: title.to_string(),
                 foreground_process_name: None,
                 panic_on_process_name: false,
+                panic_on_title: false,
+                panic_on_working_dir: false,
             })
         }
 
@@ -1389,10 +1393,12 @@ mod test {
                 title: title.to_string(),
                 foreground_process_name: Some(foreground_process_name.to_string()),
                 panic_on_process_name: false,
+                panic_on_title: false,
+                panic_on_working_dir: false,
             })
         }
 
-        fn new_with_process_name_panic(
+        fn new_for_listing_regression(
             id: PaneId,
             size: TerminalSize,
             title: &str,
@@ -1404,6 +1410,8 @@ mod test {
                 title: title.to_string(),
                 foreground_process_name: Some(foreground_process_name.to_string()),
                 panic_on_process_name: true,
+                panic_on_title: true,
+                panic_on_working_dir: true,
             })
         }
     }
@@ -1474,6 +1482,14 @@ mod test {
         }
 
         fn get_title(&self) -> String {
+            assert!(
+                !self.panic_on_title,
+                "ListPanes should not synchronously inspect pane title"
+            );
+            self.title.clone()
+        }
+
+        fn get_title_for_listing(&self) -> String {
             self.title.clone()
         }
 
@@ -1527,6 +1543,14 @@ mod test {
         }
 
         fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
+            assert!(
+                !self.panic_on_working_dir,
+                "ListPanes should not synchronously inspect pane working directory"
+            );
+            None
+        }
+
+        fn get_working_dir_for_listing(&self) -> Option<Url> {
             None
         }
 
@@ -2019,10 +2043,10 @@ mod test {
         };
         let window_id = *mux.new_empty_window(Some("default".to_string()), None);
         let tab = Arc::new(Tab::new(&tab_size));
-        let pane = TestPane::new_with_process_name_panic(
+        let pane = TestPane::new_for_listing_regression(
             alloc_pane_id(),
             tab_size,
-            "codex",
+            "wakterm",
             "codex",
         );
         let pane_id = pane.pane_id();

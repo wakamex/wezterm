@@ -462,6 +462,10 @@ impl Pane for LocalPane {
         title
     }
 
+    fn get_title_for_listing(&self) -> String {
+        self.terminal.lock().get_title().to_string()
+    }
+
     fn get_progress(&self) -> Progress {
         self.terminal.lock().get_progress()
     }
@@ -515,6 +519,10 @@ impl Pane for LocalPane {
             .get_current_dir()
             .cloned()
             .or_else(|| self.divine_current_working_dir(policy))
+    }
+
+    fn get_working_dir_for_listing(&self) -> Option<Url> {
+        self.terminal.lock().get_current_dir().cloned()
     }
 
     fn tty_name(&self) -> Option<String> {

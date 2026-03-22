@@ -233,6 +233,9 @@ pub trait Pane: Downcast + Send + Sync {
     fn get_dimensions(&self) -> RenderableDimensions;
 
     fn get_title(&self) -> String;
+    fn get_title_for_listing(&self) -> String {
+        self.get_title()
+    }
     fn get_progress(&self) -> Progress {
         Progress::None
     }
@@ -327,6 +330,9 @@ pub trait Pane: Downcast + Send + Sync {
     }
 
     fn get_current_working_dir(&self, policy: CachePolicy) -> Option<Url>;
+    fn get_working_dir_for_listing(&self) -> Option<Url> {
+        self.get_current_working_dir(CachePolicy::AllowStale)
+    }
     fn get_foreground_process_name(&self, _policy: CachePolicy) -> Option<String> {
         None
     }

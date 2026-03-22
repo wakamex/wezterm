@@ -297,7 +297,7 @@ fn pane_tree(
         }
         Tree::Leaf(pane) => {
             let dims = pane.get_dimensions();
-            let working_dir = pane.get_current_working_dir(CachePolicy::AllowStale);
+            let working_dir = pane.get_working_dir_for_listing();
             let cursor_pos = pane.get_cursor_position();
 
             PaneNode::Leaf(PaneEntry {
@@ -305,7 +305,7 @@ fn pane_tree(
                 tab_id,
                 pane_id: pane.pane_id(),
                 agent_metadata: None,
-                title: pane.get_title(),
+                title: pane.get_title_for_listing(),
                 is_active_pane: active_pane_id == Some(pane.pane_id()),
                 is_zoomed_pane: zoomed
                     .map(|zoomed| zoomed.pane_id() == pane.pane_id())
