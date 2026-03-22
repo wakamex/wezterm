@@ -253,6 +253,14 @@ impl ClientPane {
     pub fn ignore_next_kill(&self) {
         *self.ignore_next_kill.lock() = true;
     }
+
+    /// Suppress the next local focus echo back to the remote.
+    /// Used during attach/reconcile where the server already told us which
+    /// pane is active and we don't want to immediately bounce that focus
+    /// state back over RPC.
+    pub fn suppress_next_focus_advise(&self) {
+        *self.suppress_next_focus_advise.lock() = true;
+    }
 }
 
 fn translate_resize_batch<F>(

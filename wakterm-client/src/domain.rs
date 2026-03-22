@@ -931,6 +931,9 @@ impl ClientDomain {
                     );
                     if let Some(tab) = mux.get_tab(local_tab_id) {
                         if let Some(pane) = mux.get_pane(local_active_pane_id) {
+                            if let Some(client_pane) = pane.downcast_ref::<ClientPane>() {
+                                client_pane.suppress_next_focus_advise();
+                            }
                             tab.set_active_pane(&pane, mux::tab::NotifyMux::No);
                         }
                     }
@@ -956,6 +959,9 @@ impl ClientDomain {
                 );
                 if let Some(tab) = mux.get_tab(local_tab_id) {
                     if let Some(pane) = mux.get_pane(local_pane_id) {
+                        if let Some(client_pane) = pane.downcast_ref::<ClientPane>() {
+                            client_pane.suppress_next_focus_advise();
+                        }
                         tab.set_active_pane(&pane, mux::tab::NotifyMux::No);
                     }
                 }
