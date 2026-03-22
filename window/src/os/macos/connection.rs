@@ -78,11 +78,12 @@ impl Connection {
     {
         let mut prom = promise::Promise::new();
         let future = prom.get_future().unwrap();
+        let mut f = Some(f);
 
         if Self::on_main_thread() {
             let next = match Self::get().unwrap().window_by_id(window_id) {
                 Some(handle) => match handle.try_borrow_mut() {
-                    Ok(mut inner) => Some(f(&mut inner)),
+                    Ok(mut inner) => Some(f.take().unwrap()(&mut inner)),
                     Err(_) => None,
                 },
                 None => {
@@ -98,7 +99,6 @@ impl Connection {
         }
 
         promise::spawn::spawn_into_main_thread(async move {
-            let mut f = Some(f);
             loop {
                 enum NextStep<R> {
                     Complete(anyhow::Result<R>),

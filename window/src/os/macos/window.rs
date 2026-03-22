@@ -3085,7 +3085,6 @@ impl WindowView {
     }
 
     extern "C" fn draw_rect(view: &mut Object, sel: Sel, _dirty_rect: NSRect) {
-        let view_id = view as *mut Object as id;
         if let Some(this) = Self::get_this(view) {
             let mut inner = this.inner.borrow_mut();
 
