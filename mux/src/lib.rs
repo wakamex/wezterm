@@ -1537,7 +1537,7 @@ impl Mux {
             .unwrap_or_default()
     }
 
-    fn tab_badge_state_for_agents(
+    fn cached_tab_badge_state_for_agents(
         &self,
         tab_id: TabId,
         view_id: Option<&ClientViewId>,
@@ -1546,17 +1546,16 @@ impl Mux {
             return AgentTabBadgeState::default();
         };
         let runtime_by_pane = self.agent_runtime_by_pane.read();
+        let detected_agent_panes = self.detected_agent_panes.read();
         let mut badge = AgentTabBadgeState::default();
         for positioned in tab.iter_panes_ignoring_zoom() {
             let pane_id = positioned.pane.pane_id();
-            let detected_runtime;
-            let runtime = if self.get_agent_metadata_for_pane(pane_id).is_some() {
+            let runtime = if self.get_agent_metadata_for_pane(pane_id).is_some()
+                || detected_agent_panes.contains(&pane_id)
+            {
                 runtime_by_pane.get(&pane_id)
             } else {
-                detected_runtime = self
-                    .detect_agent_state_for_pane(pane_id)
-                    .map(|state| state.runtime);
-                detected_runtime.as_ref()
+                None
             };
             if let Some(runtime) = runtime {
                 if Self::agent_waiting_on_user(runtime) {
@@ -1584,13 +1583,13 @@ impl Mux {
         view_id: &ClientViewId,
         tab_id: TabId,
     ) -> AgentTabBadgeState {
-        self.tab_badge_state_for_agents(tab_id, Some(view_id))
+        self.cached_tab_badge_state_for_agents(tab_id, Some(view_id))
     }
 
     pub fn tab_badge_state_for_current_identity(&self, tab_id: TabId) -> AgentTabBadgeState {
         match self.active_view_id() {
             Some(view_id) => self.tab_badge_state_for_view(view_id.as_ref(), tab_id),
-            None => self.tab_badge_state_for_agents(tab_id, None),
+            None => self.cached_tab_badge_state_for_agents(tab_id, None),
         }
     }
 
@@ -1599,7 +1598,7 @@ impl Mux {
         if matches!(badge_mode, AgentTabBadgeMode::Off) {
             return false;
         }
-        let badge = self.tab_badge_state_for_agents(tab_id, view_id);
+        let badge = self.cached_tab_badge_state_for_agents(tab_id, view_id);
         match badge_mode {
             AgentTabBadgeMode::Off => false,
             AgentTabBadgeMode::Turn => badge.waiting_on_user,

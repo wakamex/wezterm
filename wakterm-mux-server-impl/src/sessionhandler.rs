@@ -468,7 +468,6 @@ impl SessionHandler {
                                 let window = mux.get_window(window_id).unwrap();
                                 window_titles.insert(window_id, window.get_title().to_string());
                                 for tab in window.iter() {
-                                    mux.refresh_agent_runtime_for_tab(tab.tab_id());
                                     let active_pane_id =
                                         view_state.get(&window_id).and_then(|window_state| {
                                             window_state
@@ -1364,6 +1363,7 @@ mod test {
         size: Mutex<TerminalSize>,
         title: String,
         foreground_process_name: Option<String>,
+        panic_on_process_name: bool,
     }
 
     impl TestPane {
@@ -1373,6 +1373,7 @@ mod test {
                 size: Mutex::new(size),
                 title: title.to_string(),
                 foreground_process_name: None,
+                panic_on_process_name: false,
             })
         }
 
@@ -1387,6 +1388,22 @@ mod test {
                 size: Mutex::new(size),
                 title: title.to_string(),
                 foreground_process_name: Some(foreground_process_name.to_string()),
+                panic_on_process_name: false,
+            })
+        }
+
+        fn new_with_process_name_panic(
+            id: PaneId,
+            size: TerminalSize,
+            title: &str,
+            foreground_process_name: &str,
+        ) -> Arc<dyn Pane> {
+            Arc::new(Self {
+                id,
+                size: Mutex::new(size),
+                title: title.to_string(),
+                foreground_process_name: Some(foreground_process_name.to_string()),
+                panic_on_process_name: true,
             })
         }
     }
@@ -1514,6 +1531,10 @@ mod test {
         }
 
         fn get_foreground_process_name(&self, _policy: CachePolicy) -> Option<String> {
+            assert!(
+                !self.panic_on_process_name,
+                "ListPanes should not synchronously inspect foreground process name"
+            );
             self.foreground_process_name.clone()
         }
     }
@@ -1979,6 +2000,48 @@ mod test {
             .tab_badges
             .iter()
             .any(|badge| badge.waiting_on_user && badge.needs_attention));
+    }
+
+    #[test]
+    fn list_panes_does_not_detect_agents_synchronously() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let executor = SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let tab_size = TerminalSize {
+            cols: 120,
+            rows: 40,
+            pixel_width: 960,
+            pixel_height: 720,
+            dpi: 96,
+        };
+        let window_id = *mux.new_empty_window(Some("default".to_string()), None);
+        let tab = Arc::new(Tab::new(&tab_size));
+        let pane = TestPane::new_with_process_name_panic(
+            alloc_pane_id(),
+            tab_size,
+            "codex",
+            "codex",
+        );
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let (_client, _view, mut handler) = register_test_client(&mux, "view-a");
+        let response = match handler.request(&executor, Pdu::ListPanes(ListPanes {})) {
+            Pdu::ListPanesResponse(response) => response,
+            other => panic!("expected ListPanesResponse, got {:?}", other),
+        };
+
+        assert_eq!(response.tabs.len(), 1);
+        match &response.tabs[0] {
+            mux::tab::PaneNode::Leaf(entry) => assert_eq!(entry.pane_id, pane_id),
+            other => panic!("expected leaf pane node, got {:?}", other),
+        }
+        assert!(response.tab_badges.iter().all(|badge| !badge.waiting_on_user));
     }
 
     #[test]
