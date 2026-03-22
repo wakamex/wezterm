@@ -43,8 +43,10 @@ fn session_path() -> PathBuf {
 
 fn build_saved_session(mux: &Mux) -> SavedSession {
     let mut windows = Vec::new();
+    let mut window_ids = mux.iter_windows();
+    window_ids.sort();
 
-    for window_id in mux.iter_windows() {
+    for window_id in window_ids {
         if let Some(window) = mux.get_window(window_id) {
             let workspace = window.get_workspace().to_string();
             let mut tabs = Vec::new();
@@ -697,5 +699,58 @@ mod test {
 
         let session = build_saved_session(&mux);
         assert_eq!(session.windows[0].tabs[0].title, "scrape");
+    }
+
+    #[test]
+    fn saved_session_preserves_window_and_tab_order() {
+        let _test_lock = crate::TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = crate::TestMuxGuard;
+
+        let window_a = *mux.new_empty_window(Some("default".to_string()), None);
+        let tab_size = size(120, 40);
+
+        let first = Arc::new(Tab::new(&tab_size));
+        first.assign_pane(&TestPane::new(alloc_pane_id(), tab_size));
+        first.set_title("first");
+        mux.add_tab_and_active_pane(&first).unwrap();
+        mux.add_tab_to_window(&first, window_a).unwrap();
+
+        let second = Arc::new(Tab::new(&tab_size));
+        second.assign_pane(&TestPane::new(alloc_pane_id(), tab_size));
+        second.set_title("second");
+        mux.add_tab_and_active_pane(&second).unwrap();
+        mux.add_tab_to_window(&second, window_a).unwrap();
+
+        mux.get_window_mut(window_a).unwrap().move_by_idx(1, 0);
+
+        let window_b = *mux.new_empty_window(Some("default".to_string()), None);
+        let third = Arc::new(Tab::new(&tab_size));
+        third.assign_pane(&TestPane::new(alloc_pane_id(), tab_size));
+        third.set_title("third");
+        mux.add_tab_and_active_pane(&third).unwrap();
+        mux.add_tab_to_window(&third, window_b).unwrap();
+
+        let session = build_saved_session(&mux);
+
+        assert_eq!(session.windows.len(), 2);
+        assert_eq!(
+            session.windows[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second", "first"]
+        );
+        assert_eq!(
+            session.windows[1]
+                .tabs
+                .iter()
+                .map(|tab| tab.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["third"]
+        );
     }
 }
