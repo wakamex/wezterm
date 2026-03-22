@@ -28,33 +28,6 @@ pub struct Connection {
 }
 
 impl Connection {
-    fn on_main_thread() -> bool {
-        unsafe {
-            let is_main_thread: BOOL = msg_send![class!(NSThread), isMainThread];
-            is_main_thread == YES
-        }
-    }
-
-    pub(crate) fn try_with_window_inner_now<
-        R,
-        F: FnOnce(&mut WindowInner) -> anyhow::Result<R>,
-    >(
-        window_id: usize,
-        f: F,
-    ) -> Option<anyhow::Result<R>> {
-        if !Self::on_main_thread() {
-            return None;
-        }
-
-        match Self::get().unwrap().window_by_id(window_id) {
-            Some(handle) => match handle.try_borrow_mut() {
-                Ok(mut inner) => Some(f(&mut inner)),
-                Err(_) => None,
-            },
-            None => Some(Err(anyhow::anyhow!("window id {} is invalid", window_id))),
-        }
-    }
-
     pub(crate) fn create_new() -> anyhow::Result<Self> {
         // Ensure that the SPAWN_QUEUE is created; it will have nothing
         // to run right now.
