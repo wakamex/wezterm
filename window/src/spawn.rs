@@ -246,17 +246,15 @@ impl SpawnQueue {
 
     extern "C" fn drain_on_main_queue(_: *mut std::ffi::c_void) {
         log::debug!("mac spawn queue dispatch drain fired");
-        loop {
-            while SPAWN_QUEUE.run() {}
-            SPAWN_QUEUE.scheduled.store(false, Ordering::Release);
+        // Process a single queued runnable per dispatch callback. Some
+        // main-thread futures are long-lived and can requeue themselves while
+        // remaining pending, so draining "until empty" can monopolize the
+        // queue and leave `scheduled=true` indefinitely.
+        let has_more = SPAWN_QUEUE.run();
+        SPAWN_QUEUE.scheduled.store(false, Ordering::Release);
 
-            if !SPAWN_QUEUE.has_any_queued() {
-                break;
-            }
-
-            if SPAWN_QUEUE.scheduled.swap(true, Ordering::AcqRel) {
-                break;
-            }
+        if has_more && !SPAWN_QUEUE.scheduled.swap(true, Ordering::AcqRel) {
+            DispatchQueue::main().exec_async(|| Self::drain_on_main_queue(std::ptr::null_mut()));
         }
     }
 
