@@ -929,7 +929,9 @@ impl SessionInner {
     pub fn exec(&mut self, sess: &mut SessionWrap, exec: Exec) -> anyhow::Result<ExecResult> {
         let mut channel = sess.open_session()?;
 
-        if let Some("yes") = self.config.get("forwardagent").map(|s| s.as_str()) {
+        if exec.request_agent_forwarding
+            && matches!(self.config.get("forwardagent").map(|s| s.as_str()), Some("yes"))
+        {
             if self.identity_agent().is_some() {
                 if let Err(err) = channel.request_auth_agent_forwarding() {
                     log::error!("Failed to request agent forwarding: {:#}", err);

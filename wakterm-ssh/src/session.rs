@@ -71,6 +71,7 @@ pub(crate) struct SignalChannel {
 pub(crate) struct Exec {
     pub command_line: String,
     pub env: Option<HashMap<String, String>>,
+    pub request_agent_forwarding: bool,
 }
 
 #[derive(Clone)]
@@ -159,12 +160,30 @@ impl Session {
         command_line: &str,
         env: Option<HashMap<String, String>>,
     ) -> anyhow::Result<ExecResult> {
+        self.exec_with_agent_forwarding(command_line, env, true).await
+    }
+
+    pub async fn exec_without_agent_forwarding(
+        &self,
+        command_line: &str,
+        env: Option<HashMap<String, String>>,
+    ) -> anyhow::Result<ExecResult> {
+        self.exec_with_agent_forwarding(command_line, env, false).await
+    }
+
+    async fn exec_with_agent_forwarding(
+        &self,
+        command_line: &str,
+        env: Option<HashMap<String, String>>,
+        request_agent_forwarding: bool,
+    ) -> anyhow::Result<ExecResult> {
         let (reply, rx) = bounded(1);
         self.tx
             .send(SessionRequest::Exec(
                 Exec {
                     command_line: command_line.to_string(),
                     env,
+                    request_agent_forwarding,
                 },
                 reply,
             ))

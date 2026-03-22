@@ -780,7 +780,17 @@ impl Reconnectable {
         ui.output_str(&format!("Running: {}\n", cmd));
         log::debug!("going to run {}", cmd);
 
-        let exec = smol::block_on(sess.exec(&cmd, None))?;
+        let exec = smol::block_on(async {
+            sess.exec_without_agent_forwarding(&cmd, None)
+                .or(async {
+                    smol::Timer::after(Duration::from_secs(20)).await;
+                    Err(anyhow!(
+                        "timed out waiting for remote proxy command to start: {}",
+                        cmd
+                    ))
+                })
+                .await
+        })?;
 
         let mut stderr = exec.stderr;
         std::thread::spawn(move || {
@@ -973,8 +983,18 @@ impl Reconnectable {
                     );
 
                     ui.output_str(&format!("Running: {}\n", cmd));
-                    let mut exec = smol::block_on(sess.exec(&cmd, None))
-                        .with_context(|| format!("executing `{}` on remote host", cmd))?;
+                    let mut exec = smol::block_on(async {
+                        sess.exec_without_agent_forwarding(&cmd, None)
+                            .or(async {
+                                smol::Timer::after(Duration::from_secs(20)).await;
+                                Err(anyhow!(
+                                    "timed out waiting for remote tls bootstrap command to start: {}",
+                                    cmd
+                                ))
+                            })
+                            .await
+                    })
+                    .with_context(|| format!("executing `{}` on remote host", cmd))?;
 
                     log::debug!("waiting for command to finish");
                     let status = exec.child.wait()?;
