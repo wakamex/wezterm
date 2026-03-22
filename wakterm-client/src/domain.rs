@@ -600,6 +600,13 @@ impl ClientDomain {
     ) -> anyhow::Result<()> {
         let mux = Mux::get();
         log::debug!(
+            "process_pane_list start: domain={} tabs={} window_titles={} view_windows={}",
+            inner.local_domain_id,
+            panes.tabs.len(),
+            panes.window_titles.len(),
+            panes.client_window_view_state.len()
+        );
+        log::debug!(
             "domain {}: ListPanes result {:#?}",
             inner.local_domain_id,
             panes
@@ -643,6 +650,12 @@ impl ClientDomain {
             };
 
             if let Some((remote_window_id, remote_tab_id)) = tabroot.window_and_tab_ids() {
+                log::debug!(
+                    "process_pane_list syncing remote window {} tab {} for domain {}",
+                    remote_window_id,
+                    remote_tab_id,
+                    inner.local_domain_id
+                );
                 let tab;
 
                 remote_windows_to_forget.remove(&remote_window_id);
@@ -676,6 +689,10 @@ impl ClientDomain {
 
                 log::debug!("domain: {} tree: {:#?}", inner.local_domain_id, tabroot);
                 let mut workspace = None;
+                log::debug!(
+                    "process_pane_list syncing pane tree for remote tab {}",
+                    remote_tab_id
+                );
                 tab.sync_with_pane_tree(root_size, tabroot, |entry| {
                     workspace.replace(entry.workspace.clone());
                     remote_panes_to_forget.remove(&entry.pane_id);
@@ -729,6 +746,11 @@ impl ClientDomain {
                     if window.idx_by_id(tab.tab_id()).is_none() {
                         window.push(&tab);
                     }
+                    log::debug!(
+                        "process_pane_list synced remote tab {} into existing local window {}",
+                        remote_tab_id,
+                        local_window_id
+                    );
                     continue;
                 }
 
@@ -752,6 +774,11 @@ impl ClientDomain {
                             local_window_id,
                         );
                         mux.add_tab_to_window(&tab, local_window_id)?;
+                        log::debug!(
+                            "process_pane_list attached remote tab {} to primary local window {}",
+                            remote_tab_id,
+                            local_window_id
+                        );
                         primary_window_id.take();
                         continue;
                     }
@@ -765,6 +792,12 @@ impl ClientDomain {
                 let local_window_id = mux.new_empty_window(workspace.take(), position);
                 inner.record_remote_to_local_window_mapping(remote_window_id, *local_window_id);
                 mux.add_tab_to_window(&tab, *local_window_id)?;
+                log::debug!(
+                    "process_pane_list created local window {} for remote window {} tab {}",
+                    *local_window_id,
+                    remote_window_id,
+                    remote_tab_id
+                );
             }
         }
 
@@ -778,6 +811,10 @@ impl ClientDomain {
         }
 
         for (remote_window_id, window_view_state) in client_window_view_state {
+            log::debug!(
+                "process_pane_list applying view state for remote window {}",
+                remote_window_id
+            );
             let Some(remote_tab_id) = window_view_state.active_tab_id else {
                 continue;
             };
@@ -842,6 +879,7 @@ impl ClientDomain {
             }
         }
 
+        log::debug!("process_pane_list complete for domain {}", inner.local_domain_id);
         Ok(())
     }
 
@@ -851,6 +889,11 @@ impl ClientDomain {
         panes: ListPanesResponse,
         primary_window_id: Option<WindowId>,
     ) -> anyhow::Result<()> {
+        log::debug!(
+            "finish_attach start for domain {} primary_window_id={:?}",
+            domain_id,
+            primary_window_id
+        );
         let mux = Mux::get();
         let domain = mux
             .get_domain(domain_id)
@@ -869,7 +912,9 @@ impl ClientDomain {
         ));
         *domain.inner.lock().unwrap() = Some(Arc::clone(&inner));
 
+        log::debug!("finish_attach processing pane list for domain {}", domain_id);
         Self::process_pane_list(inner, panes, primary_window_id)?;
+        log::debug!("finish_attach complete for domain {}", domain_id);
 
         Ok(())
     }
@@ -1137,6 +1182,10 @@ impl Domain for ClientDomain {
                 })
                 .await?;
 
+                log::debug!(
+                    "attach handshake complete for domain {}; entering finish_attach",
+                    domain_id
+                );
                 ClientDomain::finish_attach(domain_id, client, panes, window_id)
             }
         })
