@@ -3016,26 +3016,34 @@ impl WindowView {
     }
 
     extern "C" fn wakterm_finish_paint_throttle(view: &mut Object, _sel: Sel, _timer: id) {
-        if let Some(this) = Self::get_this(view) {
+        let view_id = view as *mut Object as id;
+        let retry = if let Some(this) = Self::get_this(view) {
             match this.inner.try_borrow_mut() {
                 Ok(mut state) => {
                     state.paint_throttled = false;
                     if state.invalidated {
                         unsafe {
-                            let () = msg_send![view, setNeedsDisplay: YES];
+                            let () = msg_send![view_id, setNeedsDisplay: YES];
                         }
                     }
+                    false
                 }
-                Err(_) => unsafe {
-                    let timer: id =
-                        msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: 0.001f64
-                            target: view
-                            selector: sel!(waktermFinishPaintThrottle:)
-                            userInfo: nil
-                            repeats: NO
-                        ];
-                    let (): () = msg_send![timer, setTolerance: 0.001f64];
-                },
+                Err(_) => true,
+            }
+        } else {
+            false
+        };
+
+        if retry {
+            unsafe {
+                let timer: id =
+                    msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: 0.001f64
+                        target: view_id
+                        selector: sel!(waktermFinishPaintThrottle:)
+                        userInfo: nil
+                        repeats: NO
+                    ];
+                let (): () = msg_send![timer, setTolerance: 0.001f64];
             }
         }
     }
@@ -3077,6 +3085,7 @@ impl WindowView {
     }
 
     extern "C" fn draw_rect(view: &mut Object, sel: Sel, _dirty_rect: NSRect) {
+        let view_id = view as *mut Object as id;
         if let Some(this) = Self::get_this(view) {
             let mut inner = this.inner.borrow_mut();
 
@@ -3101,10 +3110,11 @@ impl WindowView {
 
                 let max_fps = inner.config.max_fps;
                 let interval = 1.0 / max_fps as f64;
+                drop(inner);
                 unsafe {
                     let timer: id =
                         msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: interval
-                            target: view
+                            target: view_id
                             selector: sel!(waktermFinishPaintThrottle:)
                             userInfo: nil
                             repeats: NO
