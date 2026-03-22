@@ -1886,6 +1886,39 @@ impl Mux {
         }
     }
 
+    /// Updates client focus bookkeeping and per-view active pane state
+    /// without synthesizing pane focus callbacks.
+    pub fn set_focused_pane_for_client(
+        &self,
+        client_id: &ClientId,
+        pane_id: PaneId,
+    ) -> anyhow::Result<()> {
+        let (_domain_id, window_id, tab_id) = self
+            .resolve_pane_id(pane_id)
+            .ok_or_else(|| anyhow!("pane {pane_id} not found"))?;
+        let tab = self
+            .get_tab(tab_id)
+            .ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+
+        let view_id = {
+            let mut clients = self.clients.write();
+            let info = clients
+                .get_mut(client_id)
+                .ok_or_else(|| anyhow!("client {:?} not found", client_id))?;
+            let view_id = info.view_id.clone();
+            info.update_focused_pane(pane_id);
+            view_id
+        };
+
+        let mut client_views = self.client_views.write();
+        let view_state = client_views.entry((*view_id).clone()).or_default();
+        let window_state = view_state.windows.entry(window_id).or_default();
+        window_state.set_active_pane(tab_id, pane_id);
+        Self::seed_view_state_for_tab(window_state, &tab);
+
+        Ok(())
+    }
+
     /// Called by PaneFocused event handlers to reconcile a remote
     /// pane focus event and apply its effects locally
     pub fn focus_pane_and_containing_tab(&self, pane_id: PaneId) -> anyhow::Result<()> {

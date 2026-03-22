@@ -404,17 +404,9 @@ impl SessionHandler {
                     catch(
                         move || {
                             let mux = Mux::get();
-                            let _identity = mux.with_identity(client_id);
-
-                            mux.get_pane(pane_id)
-                                .ok_or_else(|| anyhow::anyhow!("pane {pane_id} not found"))?;
-
-                            let (_domain_id, window_id, tab_id) = mux
-                                .resolve_pane_id(pane_id)
-                                .ok_or_else(|| anyhow::anyhow!("pane {pane_id} not found"))?;
-                            mux.set_active_pane_for_current_identity(window_id, tab_id, pane_id)?;
-
-                            mux.record_focus_for_current_identity(pane_id);
+                            let client_id = client_id
+                                .ok_or_else(|| anyhow::anyhow!("SetFocusedPane before SetClientId"))?;
+                            mux.set_focused_pane_for_client(client_id.as_ref(), pane_id)?;
 
                             Ok(Pdu::UnitResponse(UnitResponse {}))
                         },
@@ -1375,6 +1367,7 @@ mod test {
         panic_on_process_name: bool,
         panic_on_title: bool,
         panic_on_working_dir: bool,
+        panic_on_focus_changed: bool,
     }
 
     impl TestPane {
@@ -1387,6 +1380,7 @@ mod test {
                 panic_on_process_name: false,
                 panic_on_title: false,
                 panic_on_working_dir: false,
+                panic_on_focus_changed: false,
             })
         }
 
@@ -1404,6 +1398,7 @@ mod test {
                 panic_on_process_name: false,
                 panic_on_title: false,
                 panic_on_working_dir: false,
+                panic_on_focus_changed: false,
             })
         }
 
@@ -1421,6 +1416,24 @@ mod test {
                 panic_on_process_name: true,
                 panic_on_title: true,
                 panic_on_working_dir: true,
+                panic_on_focus_changed: false,
+            })
+        }
+
+        fn new_for_focus_regression(
+            id: PaneId,
+            size: TerminalSize,
+            title: &str,
+        ) -> Arc<dyn Pane> {
+            Arc::new(Self {
+                id,
+                size: Mutex::new(size),
+                title: title.to_string(),
+                foreground_process_name: None,
+                panic_on_process_name: false,
+                panic_on_title: false,
+                panic_on_working_dir: false,
+                panic_on_focus_changed: true,
             })
         }
     }
@@ -1570,6 +1583,13 @@ mod test {
             );
             self.foreground_process_name.clone()
         }
+
+        fn focus_changed(&self, _focused: bool) {
+            assert!(
+                !self.panic_on_focus_changed,
+                "SetFocusedPane should not synthesize pane focus changes"
+            );
+        }
     }
 
     struct MuxGuard;
@@ -1708,6 +1728,33 @@ mod test {
         mux.register_client(client_id.clone(), view_id.clone());
         let harness = HandlerHarness::new(client_id.clone());
         (client_id, view_id, harness)
+    }
+
+    fn build_focus_regression_layout(mux: &Arc<Mux>) -> (WindowId, TabId, PaneId, PaneId) {
+        let window_id = *mux.new_empty_window(Some("default".to_string()), None);
+        let tab_size = size(120, 40);
+
+        let tab = Arc::new(Tab::new(&tab_size));
+        let left = TestPane::new(alloc_pane_id(), tab_size, "left");
+        let left_pane_id = left.pane_id();
+        tab.assign_pane(&left);
+        let right = TestPane::new_for_focus_regression(alloc_pane_id(), tab_size, "right");
+        let right_pane_id = right.pane_id();
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                target_is_second: true,
+                top_level: false,
+                size: SplitSize::Percent(50),
+            },
+            right,
+        )
+        .unwrap();
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        (window_id, tab.tab_id(), left_pane_id, right_pane_id)
     }
 
     #[test]
@@ -1888,6 +1935,42 @@ mod test {
             ),
             Some(layout.split_left_pane_id)
         );
+
+        assert!(matches!(
+            handler_a.request(&executor, Pdu::GetClientList(GetClientList)),
+            Pdu::GetClientListResponse(_)
+        ));
+    }
+
+    #[test]
+    fn set_focused_pane_does_not_synthesize_server_pane_focus() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let executor = SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let (window_id, tab_id, left_pane_id, right_pane_id) = build_focus_regression_layout(&mux);
+        let (_client, view_id, mut handler) = register_test_client(&mux, "focus-regression");
+
+        mux.set_active_tab_for_client_view(view_id.as_ref(), window_id, tab_id)
+            .unwrap();
+        mux.set_active_pane_for_client_view(view_id.as_ref(), window_id, tab_id, left_pane_id)
+            .unwrap();
+
+        assert!(matches!(
+            handler.request(
+                &executor,
+                Pdu::SetFocusedPane(SetFocusedPane {
+                    pane_id: right_pane_id,
+                })
+            ),
+            Pdu::UnitResponse(_)
+        ));
+        assert!(matches!(
+            handler.request(&executor, Pdu::GetClientList(GetClientList)),
+            Pdu::GetClientListResponse(_)
+        ));
     }
 
     #[test]
