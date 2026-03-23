@@ -594,12 +594,37 @@ impl ClientDomain {
         }
     }
 
-    fn reconcile_client_identity(mux: &Arc<Mux>) -> Option<Arc<ClientId>> {
+    fn reconcile_client_identity(
+        mux: &Arc<Mux>,
+        desired_view_id: &mux::client::ClientViewId,
+    ) -> Option<Arc<ClientId>> {
         if let Some(client_id) = mux.active_identity() {
-            return Some(client_id);
+            if mux
+                .active_view_id_for_client(client_id.as_ref())
+                .is_some_and(|view_id| view_id.as_ref() == desired_view_id)
+            {
+                return Some(client_id);
+            }
         }
 
         let clients = mux.iter_clients();
+        let mut matching_clients = clients
+            .iter()
+            .filter(|info| info.view_id.as_ref() == desired_view_id)
+            .map(|info| info.client_id.clone());
+
+        let matching_client = matching_clients.next();
+        if let Some(client_id) = matching_client {
+            if matching_clients.next().is_none() {
+                log::debug!(
+                    "process_pane_list using registered client identity {:?} for view {:?}",
+                    client_id,
+                    desired_view_id
+                );
+                return Some(client_id);
+            }
+        }
+
         if clients.len() == 1 {
             let client_id = clients[0].client_id.clone();
             log::debug!(
@@ -618,7 +643,7 @@ impl ClientDomain {
         mut primary_window_id: Option<WindowId>,
     ) -> anyhow::Result<()> {
         let mux = Mux::get();
-        let reconcile_client_id = Self::reconcile_client_identity(&mux);
+        let reconcile_client_id = Self::reconcile_client_identity(&mux, &inner.client.view_id);
         let _identity = reconcile_client_id
             .as_ref()
             .map(|client_id| mux.with_identity(Some(client_id.clone())));
@@ -1832,6 +1857,107 @@ mod test {
             mux.get_active_pane_for_window_for_current_identity(local_window_id)
                 .map(|pane| pane.pane_id()),
             Some(local_pane_id)
+        );
+    }
+
+    #[test]
+    fn first_reconcile_without_active_identity_prefers_matching_view_identity() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        ensure_test_executor();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let (_domain, inner, _client_id, view_id) =
+            install_client_domain(&mux, "matching-view-focus");
+        let (other_client_id, other_view_id, _other_client) =
+            make_dummy_client(inner.local_domain_id, "other-view-focus");
+        mux.register_client(other_client_id, other_view_id.clone());
+
+        let tab_a = leaf(1, 101, 1001, size(120, 40), true);
+        let tab_b = leaf(1, 102, 1002, size(120, 40), true);
+        apply_panes_without_identity(
+            &mux,
+            inner.clone(),
+            panes_response(vec![tab_a, tab_b], 102, 1002),
+        );
+
+        let local_window_id = inner.remote_to_local_window(1).unwrap();
+        let local_tab_id = inner.remote_to_local_tab_id(102).unwrap();
+        let local_pane_id = inner.remote_to_local_pane_id(1002).unwrap();
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_id.as_ref(), local_window_id)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_id)
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(
+                view_id.as_ref(),
+                local_window_id,
+                local_tab_id,
+            ),
+            Some(local_pane_id)
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(other_view_id.as_ref(), local_window_id)
+                .map(|tab| tab.tab_id()),
+            None
+        );
+    }
+
+    #[test]
+    fn first_reconcile_ignores_non_matching_active_identity() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        ensure_test_executor();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let (_domain, inner, client_id, view_id) =
+            install_client_domain(&mux, "target-view-focus");
+        let (other_client_id, other_view_id, _other_client) =
+            make_dummy_client(inner.local_domain_id, "other-active-view");
+        mux.register_client(other_client_id.clone(), other_view_id.clone());
+
+        let _identity = mux.with_identity(Some(other_client_id));
+        let tab_a = leaf(1, 101, 1001, size(120, 40), true);
+        let tab_b = leaf(1, 102, 1002, size(120, 40), true);
+        ClientDomain::process_pane_list(
+            inner.clone(),
+            panes_response(vec![tab_a, tab_b], 102, 1002),
+            None,
+        )
+        .unwrap();
+
+        let local_window_id = inner.remote_to_local_window(1).unwrap();
+        let local_tab_id = inner.remote_to_local_tab_id(102).unwrap();
+        let local_pane_id = inner.remote_to_local_pane_id(1002).unwrap();
+
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(view_id.as_ref(), local_window_id)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_id)
+        );
+        assert_eq!(
+            mux.get_active_pane_id_for_tab_for_client(
+                view_id.as_ref(),
+                local_window_id,
+                local_tab_id,
+            ),
+            Some(local_pane_id)
+        );
+        assert_eq!(
+            mux.get_active_tab_for_window_for_client(other_view_id.as_ref(), local_window_id)
+                .map(|tab| tab.tab_id()),
+            None
+        );
+
+        let _identity = mux.with_identity(Some(client_id));
+        assert_eq!(
+            mux.get_active_tab_for_window_for_current_identity(local_window_id)
+                .map(|tab| tab.tab_id()),
+            Some(local_tab_id)
         );
     }
 
