@@ -269,18 +269,6 @@ impl UserData for TabInformation {
     }
 }
 
-fn prompt_rename_tab_initial_value(explicit_tab_title: &str, pane_title: &str) -> String {
-    if !explicit_tab_title.is_empty() {
-        return explicit_tab_title.to_string();
-    }
-
-    if !pane_title.is_empty() {
-        return pane_title.to_string();
-    }
-
-    String::new()
-}
-
 fn default_window_title(
     active_tab: Option<&TabInformation>,
     active_pane: Option<&PaneInformation>,
@@ -2419,13 +2407,6 @@ impl TermWindow {
             None => return,
         };
 
-        let active_pane = self.get_active_pane_no_overlay();
-        let pane_title = active_pane
-            .as_ref()
-            .map(|pane| pane.get_title())
-            .unwrap_or_default();
-        let initial_value = prompt_rename_tab_initial_value(&tab.get_title(), &pane_title);
-
         let description = "Enter new name for tab".to_string();
         let prompt = "> ".to_string();
         let tab_id = tab.tab_id();
@@ -2435,7 +2416,7 @@ impl TermWindow {
                 term,
                 description,
                 prompt,
-                Some(initial_value),
+                None,
                 tab_id,
             )
         });
@@ -3785,8 +3766,7 @@ impl Drop for TermWindow {
 #[cfg(test)]
 mod test {
     use super::{
-        default_window_title, prompt_rename_tab_initial_value, PaneInformation, Progress,
-        TabInformation,
+        default_window_title, PaneInformation, Progress, TabInformation,
     };
     use std::collections::HashMap;
 
@@ -3861,18 +3841,4 @@ mod test {
         assert_eq!(default_window_title(Some(&tab), Some(&pane), 1), "wezterm");
     }
 
-    #[test]
-    fn rename_prompt_prefers_explicit_tab_title() {
-        assert_eq!(prompt_rename_tab_initial_value("my-tab", "zsh"), "my-tab");
-    }
-
-    #[test]
-    fn rename_prompt_prefers_meaningful_pane_title() {
-        assert_eq!(prompt_rename_tab_initial_value("", "zsh"), "zsh");
-    }
-
-    #[test]
-    fn rename_prompt_returns_empty_when_no_titles_exist() {
-        assert_eq!(prompt_rename_tab_initial_value("", ""), "");
-    }
 }
