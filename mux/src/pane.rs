@@ -233,9 +233,6 @@ pub trait Pane: Downcast + Send + Sync {
     fn get_dimensions(&self) -> RenderableDimensions;
 
     fn get_title(&self) -> String;
-    fn get_title_for_listing(&self) -> String {
-        self.get_title()
-    }
     fn get_progress(&self) -> Progress {
         Progress::None
     }

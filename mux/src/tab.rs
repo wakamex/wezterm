@@ -305,7 +305,7 @@ fn pane_tree(
                 tab_id,
                 pane_id: pane.pane_id(),
                 agent_metadata: None,
-                title: pane.get_title_for_listing(),
+                title: pane.get_title(),
                 is_active_pane: active_pane_id == Some(pane.pane_id()),
                 is_zoomed_pane: zoomed
                     .map(|zoomed| zoomed.pane_id() == pane.pane_id())

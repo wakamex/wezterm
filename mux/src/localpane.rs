@@ -462,10 +462,6 @@ impl Pane for LocalPane {
         title
     }
 
-    fn get_title_for_listing(&self) -> String {
-        self.terminal.lock().get_title().to_string()
-    }
-
     fn get_progress(&self) -> Progress {
         self.terminal.lock().get_progress()
     }
