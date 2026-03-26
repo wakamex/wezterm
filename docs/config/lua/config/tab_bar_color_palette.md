@@ -13,4 +13,8 @@ Possible values are:
 - `"Light"`: generate lighter tab backgrounds so they generally pair with dark text
 - `"Mixed"`: allow both dark and light generated backgrounds
 
+This option controls the family of generated background colors. In practice,
+`"Dark"` tends to yield light foreground text, `"Light"` tends to yield dark
+foreground text, and `"Mixed"` allows either based on contrast.
+
 The default is `"Dark"`.
