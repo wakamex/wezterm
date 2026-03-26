@@ -116,6 +116,7 @@ pub struct Mux {
     agent_panes_by_name: RwLock<HashMap<String, PaneId>>,
     agent_metadata_by_pane: RwLock<HashMap<PaneId, Arc<AgentMetadata>>>,
     detected_agent_panes: RwLock<HashSet<PaneId>>,
+    last_detected_agent_full_scan: Mutex<Option<Instant>>,
     agent_runtime_by_pane: RwLock<HashMap<PaneId, AgentRuntimeSnapshot>>,
     agent_observer_state_by_pane: RwLock<HashMap<PaneId, AgentObserverState>>,
     agent_attention_seen_by_view: RwLock<HashMap<ClientViewId, HashMap<PaneId, DateTime<Utc>>>>,
@@ -137,6 +138,7 @@ pub struct Mux {
 
 const BUFSIZE: usize = 1024 * 1024;
 const AGENT_HARNESS_REFRESH_THROTTLE: Duration = Duration::from_millis(250);
+const AGENT_DETECTED_FULL_SCAN_THROTTLE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentTabBadgeMode {
@@ -587,6 +589,7 @@ impl Mux {
             agent_panes_by_name: RwLock::new(HashMap::new()),
             agent_metadata_by_pane: RwLock::new(HashMap::new()),
             detected_agent_panes: RwLock::new(HashSet::new()),
+            last_detected_agent_full_scan: Mutex::new(None),
             agent_runtime_by_pane: RwLock::new(HashMap::new()),
             agent_observer_state_by_pane: RwLock::new(HashMap::new()),
             agent_attention_seen_by_view: RwLock::new(HashMap::new()),
@@ -927,13 +930,18 @@ impl Mux {
             self.clear_detected_agent_info(pane_id);
             return None;
         };
+        let title = pane.get_title();
+        let title_harness = infer_harness(&title, None);
         let foreground_process_name = pane.get_foreground_process_name(CachePolicy::AllowStale);
-        let foreground_process_info = pane.get_foreground_process_info(CachePolicy::AllowStale);
-        let Some(declared_cwd) = Self::pane_declared_cwd(&pane, foreground_process_info.as_ref())
-        else {
+        let quick_process_harness = infer_harness("", foreground_process_name.as_deref());
+        if matches!(title_harness, crate::agent::AgentHarness::Unknown)
+            && matches!(quick_process_harness, crate::agent::AgentHarness::Unknown)
+        {
             self.clear_detected_agent_info(pane_id);
             return None;
-        };
+        }
+
+        let foreground_process_info = pane.get_foreground_process_info(CachePolicy::AllowStale);
         let process_match = detect_harness_process(
             foreground_process_info.as_ref(),
             foreground_process_name.as_deref(),
@@ -942,8 +950,6 @@ impl Mux {
             .as_ref()
             .map(|matched| matched.harness.clone())
             .unwrap_or(crate::agent::AgentHarness::Unknown);
-        let title = pane.get_title();
-        let title_harness = infer_harness(&title, None);
         let harness = if !matches!(process_harness, crate::agent::AgentHarness::Unknown) {
             process_harness.clone()
         } else {
@@ -953,6 +959,12 @@ impl Mux {
             self.clear_detected_agent_info(pane_id);
             return None;
         }
+
+        let Some(declared_cwd) = Self::pane_declared_cwd(&pane, foreground_process_info.as_ref())
+        else {
+            self.clear_detected_agent_info(pane_id);
+            return None;
+        };
 
         let Some(launch_cmd) = process_match
             .as_ref()
@@ -1727,7 +1739,26 @@ impl Mux {
             .iter()
             .map(|agent| agent.metadata.name.clone())
             .collect::<HashSet<_>>();
-        let pane_ids = self.panes.read().keys().copied().collect::<Vec<_>>();
+        let now = Instant::now();
+        let full_detected_scan = {
+            let mut last_scan = self.last_detected_agent_full_scan.lock();
+            let should_scan = last_scan
+                .map(|last_scan| now.duration_since(last_scan) >= AGENT_DETECTED_FULL_SCAN_THROTTLE)
+                .unwrap_or(true);
+            if should_scan {
+                *last_scan = Some(now);
+            }
+            should_scan
+        };
+        let pane_ids = if full_detected_scan {
+            self.panes.read().keys().copied().collect::<Vec<_>>()
+        } else {
+            self.detected_agent_panes
+                .read()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        };
         for pane_id in pane_ids {
             if self.get_agent_metadata_for_pane(pane_id).is_some() {
                 continue;
