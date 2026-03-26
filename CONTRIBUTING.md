@@ -122,8 +122,15 @@ Make sure that the tests are working and that the code is correctly
 formatted otherwise the continuous integration system will fail your build:
 
 ```console
-$ rustup component add rustfmt-preview          # you only need to do this once
+$ rustup toolchain install nightly              # you only need to do this once
+$ rustup component add rustfmt --toolchain nightly
 $ cargo test --all
-$ cargo fmt --all
+$ cargo +nightly fmt --all
 ```
 
+You can also enable the tracked pre-commit hook so formatting is checked
+automatically before each commit:
+
+```console
+$ git config core.hooksPath .githooks
+```
