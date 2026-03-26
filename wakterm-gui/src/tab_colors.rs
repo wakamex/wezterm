@@ -118,7 +118,24 @@ fn active_pane_cwd(tab: &TabInformation) -> Option<String> {
     let mux = Mux::try_get()?;
     let pane = mux.get_pane(pane_id)?;
     pane.get_current_working_dir(CachePolicy::AllowStale)
-        .map(|url| url.to_string())
+        .map(|url| cwd_key_from_url(&url))
+}
+
+fn cwd_key_from_url(url: &url::Url) -> String {
+    url.path_segments()
+        .and_then(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .next_back()
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            Path::new(url.path())
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| url.to_string())
 }
 
 fn assigned_colors_for_keys(keys: BTreeSet<String>) -> HashMap<String, RgbaColor> {
@@ -419,8 +436,8 @@ impl AssignmentStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        assign_colors_for_keys, choose_most_distinct_color, hsv_to_rgba, stable_tab_key,
-        AssignmentStore,
+        assign_colors_for_keys, choose_most_distinct_color, cwd_key_from_url, hsv_to_rgba,
+        stable_tab_key, AssignmentStore,
     };
     use crate::termwindow::{PaneInformation, TabInformation};
     use std::collections::BTreeMap;
@@ -460,6 +477,18 @@ mod tests {
     fn stable_tab_key_prefers_explicit_tab_title() {
         let tab = tab(1, "debate");
         assert_eq!(stable_tab_key(&tab), "tab-title:debate");
+    }
+
+    #[test]
+    fn cwd_key_from_url_uses_last_unix_segment() {
+        let url = url::Url::parse("file://fedora/code/wakterm").unwrap();
+        assert_eq!(cwd_key_from_url(&url), "wakterm");
+    }
+
+    #[test]
+    fn cwd_key_from_url_handles_windows_file_url() {
+        let url = url::Url::parse("file:///C:/Users/Mihai/code/wakterm").unwrap();
+        assert_eq!(cwd_key_from_url(&url), "wakterm");
     }
 
     #[test]
