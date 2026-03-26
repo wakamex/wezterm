@@ -14,6 +14,46 @@ Initial targets:
 
 This is a tab bar feature, not a tab title string feature.
 
+## Current Recommendation
+
+There are now two realistic implementation paths:
+
+- cached hardcoded vector sprites
+- packaged image assets (PNG or build-time-rasterized SVG)
+
+For the current product shape, where we only need four fixed icons, the
+recommended first implementation is:
+
+- fancy tab bar only
+- active-pane harness only
+- hardcoded vector icon definitions for the four supported harnesses
+- rasterize each icon once into the existing atlas as a cached sprite
+- render the cached sprite beside the tab title
+
+This is intentionally **not** generic SVG support.
+
+### Why This Is The Current Recommendation
+
+The GUI already has two relevant rendering paths:
+
+- `ElementContent::Poly` in
+  `wakterm-gui/src/termwindow/box_model.rs`, which renders vector/poly content
+  directly during UI rendering
+- cached vector-to-sprite generation in
+  `wakterm-gui/src/customglyph.rs`, which rasterizes vector definitions into the
+  atlas and then reuses the sprite
+
+For tab icons, the second path is better:
+
+- one-time rasterization
+- cheap textured-quad rendering afterwards
+- no runtime SVG parsing
+- no arbitrary user/content API surface
+- no dependency on fonts or Unicode glyph availability
+
+So if we implement custom vector icons, they should be treated as **cached icon
+sprites**, not as directly rendered per-frame polylines.
+
 ## Why This Shape
 
 The existing tab title pipeline is text-oriented:
@@ -41,6 +81,10 @@ Relevant files:
   - fancy tab bar element construction
 - `wakterm-gui/src/termwindow/box_model.rs`
   - sprite-capable box-model rendering
+- `wakterm-gui/src/customglyph.rs`
+  - cached vector-to-sprite rasterization helpers
+- `wakterm-gui/src/glyphcache.rs`
+  - atlas-backed image/sprite caching
 - `mux/src/agent.rs`
   - `AgentHarness`
 - `mux/src/lib.rs`
@@ -87,19 +131,46 @@ Instead, add or reuse a cheap cached mux getter that can answer:
 This lookup must only consult already-cached adopted/detected agent state and
 must not trigger synchronous harness refresh work.
 
-## Asset Strategy
+## Icon Source Options
 
-### V1
+### Option A: Hardcoded Vector Icons
 
-Use packaged image assets, not runtime SVG parsing.
+Define four internal icon shapes in code:
+
+- Claude
+- Codex
+- Gemini
+- OpenCode
+
+These should be simplified, compact harness marks rather than full wordmarks.
+They should be rendered into RGBA or monochrome sprites once and cached in the
+atlas, similar in spirit to the custom cursor/block glyph path.
+
+#### Pros
+
+- fastest runtime path after caching
+- no new SVG parser or runtime rasterizer
+- no dependency on asset decode in the hot path
+- tightly controlled sizing and styling
+- minimal product/API surface
+
+#### Cons
+
+- lower brand fidelity than official logos
+- requires hand-authoring/maintaining the vector shapes
+- monochrome/tintable paths are easier than full-color logos
+
+### Option B: Packaged Image Assets
+
+Use packaged image assets, not runtime generic SVG parsing.
 
 Reasons:
 
 - simpler implementation
-- no new SVG dependency in the render path
+- no generic SVG dependency in the render path
 - the GUI already has PNG/image decoding and sprite atlas plumbing
 
-Suggested asset location:
+Suggested asset location for this path:
 
 - `assets/tab-icons/`
 
@@ -110,7 +181,7 @@ Suggested files:
 - `gemini.png`
 - `opencode.png`
 
-### Anthropic / Claude
+#### Anthropic / Claude
 
 For Claude, prefer the official icon asset from the local Anthropic brand kit:
 
@@ -119,13 +190,27 @@ For Claude, prefer the official icon asset from the local Anthropic brand kit:
 
 For a small tab badge, use the icon asset, not the `Claude Code` wordmark.
 
-### Branding / Shipping
+#### Branding / Shipping
 
 For local experimentation, official assets are fine.
 
 For public/upstream distribution, brand/trademark review should remain separate
 from the implementation. If needed, start with internal placeholder/custom
 assets and swap to official assets later.
+
+### Why Not Generic SVG Support
+
+Generic SVG-in-tab-bar is a much larger feature than the product needs.
+
+It would introduce:
+
+- a parsing/rasterization surface for arbitrary content
+- more layout and scaling edge cases
+- more caching invalidation concerns
+- a larger API than “show one of four known harness icons”
+
+We do not need that flexibility. The product requirement is narrow and known in
+advance, so the implementation should stay narrow too.
 
 ## Rendering Plan
 
@@ -134,6 +219,13 @@ assets and swap to official assets later.
 Render icons only in the fancy tab bar.
 
 Do not change the classic text-only tab bar in the first iteration.
+
+### Recommended V1 Scope
+
+Use cached hardcoded vector sprites in the fancy tab bar only.
+
+Keep the packaged-image path as a fallback if we later decide exact official
+brand fidelity matters more than the narrower implementation.
 
 ### `TabEntry`
 
@@ -151,13 +243,26 @@ truncation.
 
 In `wakterm-gui/src/termwindow/render/fancy_tab_bar.rs`:
 
-- load the icon as a sprite
+- resolve the icon into a cached sprite
 - place it before the title text
 - use a fixed compact size suitable for tabs
 - keep spacing consistent whether the icon is present or absent
 
 The box-model/sprite path already exists, so this should be implemented as a
 sprite element rather than as terminal text cells.
+
+### Cached Vector Sprite Plan
+
+If using hardcoded vector icons:
+
+- add a small icon enum, e.g. `TabHarnessIcon`
+- add a cache keyed by `(icon kind, scale bucket, theme variant if needed)`
+- rasterize the icon to an RGBA image once
+- allocate it into the atlas
+- reuse the resulting sprite during fancy-tab rendering
+
+This is preferable to rendering the vector path every frame via
+`ElementContent::Poly`.
 
 ### Fallback Behavior
 
@@ -198,16 +303,17 @@ Use the existing GUI image/sprite atlas infrastructure.
 
 - add `TabHarnessIcon`
 - plumb icon hint into `TabInformation`
-- render PNG-backed icons in fancy tab bar only
+- render cached icon sprites in fancy tab bar only
 
 ### Phase 2
 
+- optionally swap custom vector sprites for packaged official assets
 - add classic tab bar support if desired
 
 ### Phase 3
 
-- optionally switch from checked-in PNGs to SVG source + build-time or cached
-  rasterization
+- if needed, support build-time rasterization from checked-in SVG source
+  while keeping runtime rendering sprite-based
 
 ### Phase 4
 
@@ -216,7 +322,7 @@ Use the existing GUI image/sprite atlas infrastructure.
 ## Non-Goals
 
 - inline SVG markup in tab titles
-- arbitrary user-supplied SVG rendering in the title string path
+- arbitrary user-supplied SVG rendering in the title string path or tab bar
 - changing tab title strings themselves
 - synchronous agent discovery/refresh in the paint path
 
