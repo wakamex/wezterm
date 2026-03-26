@@ -60,7 +60,10 @@ enum AgentSubCommand {
     )]
     Watch(WatchAgentsCommand),
 
-    #[command(name = "inspect", about = "inspect a single adopted or detected agent by name or id")]
+    #[command(
+        name = "inspect",
+        about = "inspect a single adopted or detected agent by name or id"
+    )]
     Inspect(InspectAgentCommand),
 
     #[command(name = "send", about = "send a message to an agent pane")]
@@ -1663,14 +1666,11 @@ impl AdoptDetectedAgentCommand {
             .as_deref()
             .unwrap_or(detected.metadata.name.as_str());
 
-        if let Some(existing) = agents
-            .iter()
-            .find(|agent| {
-                matches!(agent.origin, AgentOrigin::Adopted)
-                    && agent.metadata.name == name
-                    && agent.pane_id != detected.pane_id
-            })
-        {
+        if let Some(existing) = agents.iter().find(|agent| {
+            matches!(agent.origin, AgentOrigin::Adopted)
+                && agent.metadata.name == name
+                && agent.pane_id != detected.pane_id
+        }) {
             bail!(
                 "agent name {} is already assigned to pane {}",
                 name,
@@ -2870,7 +2870,11 @@ mod test {
                 let baseline = baseline.clone();
                 move || {
                     let baseline = baseline.clone();
-                    async move { Ok(ListAgentsResponse { agents: vec![baseline] }) }
+                    async move {
+                        Ok(ListAgentsResponse {
+                            agents: vec![baseline],
+                        })
+                    }
                 }
             },
             {
@@ -3380,7 +3384,10 @@ mod test {
         assert_eq!(calls[0].pane_id, 30);
         assert_eq!(calls[0].metadata.name, "reviewer");
         assert_eq!(calls[0].metadata.launch_cmd, detected.metadata.launch_cmd);
-        assert_eq!(calls[0].metadata.declared_cwd, detected.metadata.declared_cwd);
+        assert_eq!(
+            calls[0].metadata.declared_cwd,
+            detected.metadata.declared_cwd
+        );
         assert_eq!(calls[0].metadata.created_at, detected.metadata.created_at);
     }
 

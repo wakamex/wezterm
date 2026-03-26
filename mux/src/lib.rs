@@ -1914,7 +1914,8 @@ impl Mux {
             .collect::<Vec<_>>();
         pane_ids.sort_unstable();
         for pane_id in pane_ids {
-            if let Some(agent) = self.build_cached_detected_agent_snapshot(pane_id, &mut taken_names)
+            if let Some(agent) =
+                self.build_cached_detected_agent_snapshot(pane_id, &mut taken_names)
             {
                 agents.push(agent);
             }
@@ -2559,16 +2560,19 @@ impl Mux {
 
     fn should_skip_queued_notification(&self, notification: &MuxNotification) -> bool {
         match notification {
-            MuxNotification::PaneOutput(pane_id) => {
-                !self.pending_pane_output_notifications.lock().insert(*pane_id)
-            }
+            MuxNotification::PaneOutput(pane_id) => !self
+                .pending_pane_output_notifications
+                .lock()
+                .insert(*pane_id),
             _ => false,
         }
     }
 
     fn clear_pending_notification(&self, notification: &MuxNotification) {
         if let MuxNotification::PaneOutput(pane_id) = notification {
-            self.pending_pane_output_notifications.lock().remove(pane_id);
+            self.pending_pane_output_notifications
+                .lock()
+                .remove(pane_id);
         }
     }
 
@@ -4877,7 +4881,10 @@ mod test {
             .get(&pane_id)
             .cloned()
             .expect("adopted runtime");
-        assert_eq!(runtime.session_path.as_deref(), Some(preserved_session.as_str()));
+        assert_eq!(
+            runtime.session_path.as_deref(),
+            Some(preserved_session.as_str())
+        );
         assert_eq!(runtime.transport, crate::agent::AgentTransport::ObservedPty);
 
         unsafe {

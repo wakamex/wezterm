@@ -160,7 +160,8 @@ impl Session {
         command_line: &str,
         env: Option<HashMap<String, String>>,
     ) -> anyhow::Result<ExecResult> {
-        self.exec_with_agent_forwarding(command_line, env, true).await
+        self.exec_with_agent_forwarding(command_line, env, true)
+            .await
     }
 
     pub async fn exec_without_agent_forwarding(
@@ -168,7 +169,8 @@ impl Session {
         command_line: &str,
         env: Option<HashMap<String, String>>,
     ) -> anyhow::Result<ExecResult> {
-        self.exec_with_agent_forwarding(command_line, env, false).await
+        self.exec_with_agent_forwarding(command_line, env, false)
+            .await
     }
 
     async fn exec_with_agent_forwarding(

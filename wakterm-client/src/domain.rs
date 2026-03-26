@@ -1914,8 +1914,7 @@ mod test {
         Mux::set_mux(&mux);
         let _guard = MuxGuard;
 
-        let (_domain, inner, client_id, view_id) =
-            install_client_domain(&mux, "target-view-focus");
+        let (_domain, inner, client_id, view_id) = install_client_domain(&mux, "target-view-focus");
         let (other_client_id, other_view_id, _other_client) =
             make_dummy_client(inner.local_domain_id, "other-active-view");
         mux.register_client(other_client_id.clone(), other_view_id.clone());

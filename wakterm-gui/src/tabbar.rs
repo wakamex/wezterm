@@ -241,9 +241,9 @@ fn compute_tab_title(
 
                 if !config.use_fancy_tab_bar {
                     if let Some(icon) = tab.harness_icon {
-                    let graphic = format!("{} ", icon.as_glyph());
-                    len += unicode_column_width(&graphic, None);
-                    items.push(FormatItem::Text(graphic));
+                        let graphic = format!("{} ", icon.as_glyph());
+                        len += unicode_column_width(&graphic, None);
+                        items.push(FormatItem::Text(graphic));
                     }
                 }
 

@@ -997,11 +997,15 @@ impl Tab {
     }
 
     pub fn set_active_idx(&self, pane_index: usize) {
-        self.inner.lock().set_active_idx_impl(pane_index, NotifyMux::Yes)
+        self.inner
+            .lock()
+            .set_active_idx_impl(pane_index, NotifyMux::Yes)
     }
 
     pub fn set_active_idx_no_notify(&self, pane_index: usize) {
-        self.inner.lock().set_active_idx_impl(pane_index, NotifyMux::No)
+        self.inner
+            .lock()
+            .set_active_idx_impl(pane_index, NotifyMux::No)
     }
 
     /// Assigns the root pane.

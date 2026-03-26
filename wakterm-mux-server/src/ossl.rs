@@ -84,9 +84,9 @@ impl OpenSSLNetListener {
                             let _ = std::thread::spawn(move || {
                                 promise::spawn::block_on(async move {
                                     log::error!("Making new AsyncSslStream");
-                                    wakterm_mux_server_impl::dispatch::process(
-                                        AsyncSslStream::new(stream),
-                                    )
+                                    wakterm_mux_server_impl::dispatch::process(AsyncSslStream::new(
+                                        stream,
+                                    ))
                                     .await
                                     .map_err(|e| {
                                         log::error!("process: {:?}", e);

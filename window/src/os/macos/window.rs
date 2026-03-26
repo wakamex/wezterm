@@ -3036,13 +3036,12 @@ impl WindowView {
 
         if retry {
             unsafe {
-                let timer: id =
-                    msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: 0.001f64
-                        target: view_id
-                        selector: sel!(waktermFinishPaintThrottle:)
-                        userInfo: nil
-                        repeats: NO
-                    ];
+                let timer: id = msg_send![class!(NSTimer), scheduledTimerWithTimeInterval: 0.001f64
+                    target: view_id
+                    selector: sel!(waktermFinishPaintThrottle:)
+                    userInfo: nil
+                    repeats: NO
+                ];
                 let (): () = msg_send![timer, setTolerance: 0.001f64];
             }
         }

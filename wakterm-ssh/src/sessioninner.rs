@@ -935,7 +935,10 @@ impl SessionInner {
         let mut channel = sess.open_session()?;
 
         if exec.request_agent_forwarding
-            && matches!(self.config.get("forwardagent").map(|s| s.as_str()), Some("yes"))
+            && matches!(
+                self.config.get("forwardagent").map(|s| s.as_str()),
+                Some("yes")
+            )
         {
             if self.identity_agent().is_some() {
                 if let Err(err) = channel.request_auth_agent_forwarding() {

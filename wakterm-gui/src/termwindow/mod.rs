@@ -343,7 +343,12 @@ fn default_window_title(
 
     match active_tab {
         Some(tab) if num_tabs > 1 => {
-            format!("{zoom_prefix}[{}/{}] {}", tab.tab_index + 1, num_tabs, title)
+            format!(
+                "{zoom_prefix}[{}/{}] {}",
+                tab.tab_index + 1,
+                num_tabs,
+                title
+            )
         }
         Some(_) | None => format!("{zoom_prefix}{title}"),
     }
@@ -663,9 +668,13 @@ impl TermWindow {
                     "focus_changed recorded focus for identity focused={focused} pane_id={pane_id}"
                 );
             }
-            log::trace!("focus_changed calling pane.focus_changed focused={focused} pane_id={pane_id}");
+            log::trace!(
+                "focus_changed calling pane.focus_changed focused={focused} pane_id={pane_id}"
+            );
             pane.focus_changed(focused);
-            log::trace!("focus_changed pane.focus_changed returned focused={focused} pane_id={pane_id}");
+            log::trace!(
+                "focus_changed pane.focus_changed returned focused={focused} pane_id={pane_id}"
+            );
         } else {
             log::trace!("focus_changed no active pane focused={focused}");
         }
@@ -3823,9 +3832,7 @@ impl Drop for TermWindow {
 
 #[cfg(test)]
 mod test {
-    use super::{
-        default_window_title, PaneInformation, Progress, TabInformation,
-    };
+    use super::{default_window_title, PaneInformation, Progress, TabInformation};
     use std::collections::HashMap;
 
     fn pane_with_title(title: &str) -> PaneInformation {
@@ -3891,7 +3898,10 @@ mod test {
         let mut tab = tab_info("build", Some("bash"));
         tab.tab_index = 1;
         let pane = pane_with_title("bash");
-        assert_eq!(default_window_title(Some(&tab), Some(&pane), 3), "[2/3] build");
+        assert_eq!(
+            default_window_title(Some(&tab), Some(&pane), 3),
+            "[2/3] build"
+        );
     }
 
     #[test]
@@ -3900,5 +3910,4 @@ mod test {
         let pane = pane_with_title("wezterm");
         assert_eq!(default_window_title(Some(&tab), Some(&pane), 1), "wezterm");
     }
-
 }

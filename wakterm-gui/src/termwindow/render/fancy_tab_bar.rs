@@ -550,19 +550,15 @@ fn make_x_button(
     })
 }
 
-fn make_harness_icon_spacer(
-    font: &Rc<LoadedFont>,
-    slot_width: f32,
-    gap: f32,
-) -> Element {
+fn make_harness_icon_spacer(font: &Rc<LoadedFont>, slot_width: f32, gap: f32) -> Element {
     Element::new(font, ElementContent::Children(vec![]))
-    .min_width(Some(Dimension::Pixels(slot_width)))
-    .margin(BoxDimension {
-        left: Dimension::Cells(0.),
-        right: Dimension::Pixels(gap),
-        top: Dimension::Pixels(0.),
-        bottom: Dimension::Cells(0.),
-    })
+        .min_width(Some(Dimension::Pixels(slot_width)))
+        .margin(BoxDimension {
+            left: Dimension::Cells(0.),
+            right: Dimension::Pixels(gap),
+            top: Dimension::Pixels(0.),
+            bottom: Dimension::Cells(0.),
+        })
 }
 
 fn harness_icon_slot_width(tab_bar_height: f32) -> f32 {
@@ -597,8 +593,9 @@ fn harness_icon_color(
         TabBarItem::Tab { active: true, .. } => {
             fg.unwrap_or_else(|| colors.active_tab().fg_color.to_linear())
         }
-        TabBarItem::Tab { active: false, .. } if hovered => fg
-            .unwrap_or_else(|| colors.inactive_tab_hover().fg_color.to_linear()),
+        TabBarItem::Tab { active: false, .. } if hovered => {
+            fg.unwrap_or_else(|| colors.inactive_tab_hover().fg_color.to_linear())
+        }
         TabBarItem::Tab { active: false, .. } => {
             fg.unwrap_or_else(|| colors.inactive_tab().fg_color.to_linear())
         }
@@ -608,19 +605,21 @@ fn harness_icon_color(
 
 fn first_non_default_background(line: &Line) -> Option<ColorAttribute> {
     (0..line.len()).find_map(|idx| {
-        line.get_cell(idx).and_then(|cell| match cell.attrs().background() {
-            ColorAttribute::Default => None,
-            color => Some(color),
-        })
+        line.get_cell(idx)
+            .and_then(|cell| match cell.attrs().background() {
+                ColorAttribute::Default => None,
+                color => Some(color),
+            })
     })
 }
 
 fn first_non_default_foreground(line: &Line) -> Option<ColorAttribute> {
     (0..line.len()).find_map(|idx| {
-        line.get_cell(idx).and_then(|cell| match cell.attrs().foreground() {
-            ColorAttribute::Default => None,
-            color => Some(color),
-        })
+        line.get_cell(idx)
+            .and_then(|cell| match cell.attrs().foreground() {
+                ColorAttribute::Default => None,
+                color => Some(color),
+            })
     })
 }
 

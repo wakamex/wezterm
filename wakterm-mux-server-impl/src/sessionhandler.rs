@@ -404,8 +404,9 @@ impl SessionHandler {
                     catch(
                         move || {
                             let mux = Mux::get();
-                            let client_id = client_id
-                                .ok_or_else(|| anyhow::anyhow!("SetFocusedPane before SetClientId"))?;
+                            let client_id = client_id.ok_or_else(|| {
+                                anyhow::anyhow!("SetFocusedPane before SetClientId")
+                            })?;
                             mux.set_focused_pane_for_client(client_id.as_ref(), pane_id)?;
 
                             Ok(Pdu::UnitResponse(UnitResponse {}))
@@ -479,17 +480,19 @@ impl SessionHandler {
                                     if window_state.active_tab_id.is_none() {
                                         window_state.active_tab_id = Some(tab.tab_id());
                                     }
-                                    let tab_state = window_state.tabs.entry(tab.tab_id()).or_default();
+                                    let tab_state =
+                                        window_state.tabs.entry(tab.tab_id()).or_default();
                                     if tab_state.active_pane_id.is_none() {
                                         tab_state.active_pane_id =
                                             tab.get_active_pane().map(|pane| pane.pane_id());
                                     }
-                                    let active_pane_id =
-                                        window_state
-                                            .tabs
-                                            .get(&tab.tab_id())
-                                            .and_then(|tab_state| tab_state.active_pane_id)
-                                        .or_else(|| tab.get_active_pane().map(|pane| pane.pane_id()));
+                                    let active_pane_id = window_state
+                                        .tabs
+                                        .get(&tab.tab_id())
+                                        .and_then(|tab_state| tab_state.active_pane_id)
+                                        .or_else(|| {
+                                            tab.get_active_pane().map(|pane| pane.pane_id())
+                                        });
                                     let mut tree =
                                         tab.codec_pane_tree_with_active_pane_id(active_pane_id);
                                     mux.annotate_pane_tree_with_agent_metadata(&mut tree);
@@ -1435,11 +1438,7 @@ mod test {
             })
         }
 
-        fn new_for_focus_regression(
-            id: PaneId,
-            size: TerminalSize,
-            title: &str,
-        ) -> Arc<dyn Pane> {
+        fn new_for_focus_regression(id: PaneId, size: TerminalSize, title: &str) -> Arc<dyn Pane> {
             Arc::new(Self {
                 id,
                 size: Mutex::new(size),
@@ -2150,12 +2149,8 @@ mod test {
         };
         let window_id = *mux.new_empty_window(Some("default".to_string()), None);
         let tab = Arc::new(Tab::new(&tab_size));
-        let pane = TestPane::new_for_listing_regression(
-            alloc_pane_id(),
-            tab_size,
-            "wakterm",
-            "codex",
-        );
+        let pane =
+            TestPane::new_for_listing_regression(alloc_pane_id(), tab_size, "wakterm", "codex");
         let pane_id = pane.pane_id();
         tab.assign_pane(&pane);
         mux.add_tab_and_active_pane(&tab).unwrap();
@@ -2172,7 +2167,10 @@ mod test {
             mux::tab::PaneNode::Leaf(entry) => assert_eq!(entry.pane_id, pane_id),
             other => panic!("expected leaf pane node, got {:?}", other),
         }
-        assert!(response.tab_badges.iter().all(|badge| !badge.waiting_on_user));
+        assert!(response
+            .tab_badges
+            .iter()
+            .all(|badge| !badge.waiting_on_user));
     }
 
     #[test]
