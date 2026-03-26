@@ -52,6 +52,7 @@ mod shapecache;
 mod spawn;
 mod stats;
 mod tabbar;
+mod tab_colors;
 mod termwindow;
 mod unicode_names;
 mod uniforms;

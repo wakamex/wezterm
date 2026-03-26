@@ -16,4 +16,4 @@ The `TabInformation` struct contains the following fields:
 * `window_title` - the title of the window that contains this tab {{since('20220807-113146-c2fee766', inline=True)}}
 * `tab_title` - the title of the tab {{since('20220807-113146-c2fee766', inline=True)}}
 * `effective_title` - the tab title if it was explicitly set, otherwise the active pane title if available, otherwise an empty string
-
+* `assigned_color` - the generated background color assigned to this tab by the built-in tab color system, or `nil` if no generated color is assigned. This is useful in `format-tab-title` callbacks if you want to consume the built-in assignment while still customizing the tab contents.
