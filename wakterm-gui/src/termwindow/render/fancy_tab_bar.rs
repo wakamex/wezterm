@@ -9,8 +9,7 @@ use config::{Dimension, DimensionContext, TabBarColors};
 use std::rc::Rc;
 use wakterm_font::LoadedFont;
 use wakterm_term::color::{ColorAttribute, ColorPalette};
-use wakterm_term::Line;
-use wakterm_term::TerminalConfiguration;
+use wakterm_term::{Line, TerminalConfiguration};
 use window::{IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
 
 const X_BUTTON: &[Poly] = &[

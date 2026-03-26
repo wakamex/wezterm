@@ -1,5 +1,5 @@
-use crate::termwindow::{PaneInformation, TabHarnessIcon, TabInformation, UIItem, UIItemType};
 use crate::tab_colors::{tab_render_colors, TabColorVisualState};
+use crate::termwindow::{PaneInformation, TabHarnessIcon, TabInformation, UIItem, UIItemType};
 use config::{ColorSpec as ConfigColorSpec, ConfigHandle, TabBarColors};
 use finl_unicode::grapheme_clusters::Graphemes;
 use mlua::FromLua;
@@ -566,12 +566,10 @@ impl TabBarState {
             let mut cell_attrs = cell_attrs.clone();
             if let Some(colors) = assigned_colors {
                 if tab_title.title_bg.is_none() {
-                    cell_attrs
-                        .set_background(termwiz::color::ColorSpec::TrueColor(*colors.bg));
+                    cell_attrs.set_background(termwiz::color::ColorSpec::TrueColor(*colors.bg));
                 }
                 if tab_title.title_fg.is_none() {
-                    cell_attrs
-                        .set_foreground(termwiz::color::ColorSpec::TrueColor(*colors.fg));
+                    cell_attrs.set_foreground(termwiz::color::ColorSpec::TrueColor(*colors.fg));
                 }
             }
 
@@ -591,12 +589,12 @@ impl TabBarState {
                 item: TabBarItem::Tab { tab_idx, active },
                 title,
                 icon: tab_info[tab_idx].harness_icon,
-                title_bg: tab_title
-                    .title_bg
-                    .or_else(|| assigned_colors.map(|colors| ConfigColorSpec::Color(colors.bg).into())),
-                title_fg: tab_title
-                    .title_fg
-                    .or_else(|| assigned_colors.map(|colors| ConfigColorSpec::Color(colors.fg).into())),
+                title_bg: tab_title.title_bg.or_else(|| {
+                    assigned_colors.map(|colors| ConfigColorSpec::Color(colors.bg).into())
+                }),
+                title_fg: tab_title.title_fg.or_else(|| {
+                    assigned_colors.map(|colors| ConfigColorSpec::Color(colors.fg).into())
+                }),
                 x: tab_start_idx,
                 width,
             });

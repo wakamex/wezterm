@@ -1,7 +1,5 @@
 use crate::termwindow::TabInformation;
-use config::{
-    ConfigHandle, RgbaColor, SrgbaTuple, TabBarColorMode, TabBarColorPalette, CACHE_DIR,
-};
+use config::{ConfigHandle, RgbaColor, SrgbaTuple, TabBarColorMode, TabBarColorPalette, CACHE_DIR};
 use lazy_static::lazy_static;
 use mux::pane::CachePolicy;
 use mux::Mux;
@@ -217,8 +215,11 @@ fn choose_most_distinct_color(
                 .partial_cmp(&score_b)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
-                    circular_distance(*idx_b, preferred_idx, palette.len())
-                        .cmp(&circular_distance(*idx_a, preferred_idx, palette.len()))
+                    circular_distance(*idx_b, preferred_idx, palette.len()).cmp(&circular_distance(
+                        *idx_a,
+                        preferred_idx,
+                        palette.len(),
+                    ))
                 })
         })
         .map(|(_, color)| color)
@@ -394,7 +395,10 @@ impl AssignmentStore {
                 }
             }
             Err(err) => {
-                log::warn!("failed to read tab color assignment cache {}: {err:#}", path.display());
+                log::warn!(
+                    "failed to read tab color assignment cache {}: {err:#}",
+                    path.display()
+                );
                 return Self {
                     loaded: true,
                     assignments: BTreeMap::new(),
@@ -590,22 +594,18 @@ mod tests {
 
     #[test]
     fn dark_palette_prefers_light_text() {
-        assert!(
-            candidate_palette(TabBarColorPalette::Dark)
-                .iter()
-                .copied()
-                .all(prefers_light_text)
-        );
+        assert!(candidate_palette(TabBarColorPalette::Dark)
+            .iter()
+            .copied()
+            .all(prefers_light_text));
     }
 
     #[test]
     fn light_palette_prefers_dark_text() {
-        assert!(
-            candidate_palette(TabBarColorPalette::Light)
-                .iter()
-                .copied()
-                .all(prefers_dark_text)
-        );
+        assert!(candidate_palette(TabBarColorPalette::Light)
+            .iter()
+            .copied()
+            .all(prefers_dark_text));
     }
 
     #[test]
