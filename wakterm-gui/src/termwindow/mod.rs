@@ -17,6 +17,7 @@ use crate::scripting::guiwin::GuiWin;
 use crate::scrollbar::*;
 use crate::selection::Selection;
 use crate::shapecache::*;
+use crate::tab_colors::assign_tab_colors;
 use crate::tabbar::{TabBarItem, TabBarState};
 use crate::termwindow::background::{
     load_background_image, reload_background_image, LoadedBackgroundLayer,
@@ -258,6 +259,7 @@ pub struct TabInformation {
     pub is_last_active: bool,
     pub active_pane: Option<PaneInformation>,
     pub harness_icon: Option<TabHarnessIcon>,
+    pub assigned_color: Option<config::RgbaColor>,
     pub window_id: MuxWindowId,
     pub tab_title: String,
 }
@@ -290,6 +292,9 @@ impl UserData for TabInformation {
         });
         fields.add_field_method_get("harness_icon", |_, this| {
             Ok(this.harness_icon.map(|icon| icon.as_str().to_string()))
+        });
+        fields.add_field_method_get("assigned_color", |_, this| {
+            Ok(this.assigned_color.map(String::from))
         });
         fields.add_field_method_get("effective_title", |_, this| Ok(this.effective_title()));
         fields.add_field_method_get("panes", |_, this| {
@@ -3648,7 +3653,7 @@ impl TermWindow {
         let tab_index = self.get_active_tab_index();
         let last_active_idx = self.get_last_active_tab_index();
 
-        window
+        let mut tabs: Vec<TabInformation> = window
             .iter()
             .enumerate()
             .map(|(idx, tab)| {
@@ -3666,10 +3671,14 @@ impl TermWindow {
                         mux.cached_agent_harness_for_pane(pos.pane.pane_id())
                             .and_then(TabHarnessIcon::from_agent_harness)
                     }),
+                    assigned_color: None,
                     active_pane: active_pane.map(Self::pos_pane_to_pane_info),
                 }
             })
-            .collect()
+            .collect();
+
+        assign_tab_colors(&self.config, &mut tabs);
+        tabs
     }
 
     fn get_pane_information(&self) -> Vec<PaneInformation> {
@@ -3846,6 +3855,7 @@ mod test {
             is_last_active: false,
             active_pane: active_pane_title.map(pane_with_title),
             harness_icon: None,
+            assigned_color: None,
             window_id: 0,
             tab_title: tab_title.to_string(),
         }

@@ -513,6 +513,13 @@ pub struct Config {
     #[dynamic(default)]
     pub tab_and_split_indices_are_zero_based: bool,
 
+    /// Controls built-in per-tab background coloring in the tab bar.
+    /// `Off` disables it, `Hash` deterministically hashes each tab identity
+    /// to a color, and `Assign` persists first-seen assignments while picking
+    /// new colors to stay distinct from prior assignments.
+    #[dynamic(default)]
+    pub tab_bar_color_mode: TabBarColorMode,
+
     /// Specifies the maximum width that a tab can have in the
     /// tab bar.  Defaults to 16 glyphs in width.
     #[dynamic(default = "default_tab_max_width")]
@@ -1922,6 +1929,16 @@ pub enum DefaultCursorStyle {
     BlinkingBar,
     SteadyBar,
 }
+
+#[derive(FromDynamic, ToDynamic, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabBarColorMode {
+    #[default]
+    Off,
+    Hash,
+    Assign,
+}
+
+impl_lua_conversion_dynamic!(TabBarColorMode);
 
 impl DefaultCursorStyle {
     pub fn effective_shape(self, shape: CursorShape) -> CursorShape {
