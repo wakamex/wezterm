@@ -113,6 +113,7 @@ static SUB_ID: AtomicUsize = AtomicUsize::new(0);
 pub struct Mux {
     tabs: RwLock<HashMap<TabId, Arc<Tab>>>,
     panes: RwLock<HashMap<PaneId, Arc<dyn Pane>>>,
+    mirrored_agent_harness_by_pane: RwLock<HashMap<PaneId, crate::agent::AgentHarness>>,
     agent_panes_by_name: RwLock<HashMap<String, PaneId>>,
     agent_metadata_by_pane: RwLock<HashMap<PaneId, Arc<AgentMetadata>>>,
     detected_agent_panes: RwLock<HashSet<PaneId>>,
@@ -586,6 +587,7 @@ impl Mux {
         Self {
             tabs: RwLock::new(HashMap::new()),
             panes: RwLock::new(HashMap::new()),
+            mirrored_agent_harness_by_pane: RwLock::new(HashMap::new()),
             agent_panes_by_name: RwLock::new(HashMap::new()),
             agent_metadata_by_pane: RwLock::new(HashMap::new()),
             detected_agent_panes: RwLock::new(HashSet::new()),
@@ -702,6 +704,31 @@ impl Mux {
         self.set_agent_metadata_with_initial_refresh(pane_id, metadata, InitialAgentRefresh::Async)
     }
 
+    pub fn set_mirrored_agent_harness(&self, pane_id: PaneId, metadata: Option<&AgentMetadata>) {
+        let tab_id = self.resolve_pane_id(pane_id).map(|(_, _, tab_id)| tab_id);
+        let harness = metadata.and_then(|metadata| {
+            let harness = infer_harness(&metadata.launch_cmd, None);
+            if matches!(harness, crate::agent::AgentHarness::Unknown) {
+                None
+            } else {
+                Some(harness)
+            }
+        });
+        match harness {
+            Some(harness) => {
+                self.mirrored_agent_harness_by_pane
+                    .write()
+                    .insert(pane_id, harness);
+            }
+            None => {
+                self.mirrored_agent_harness_by_pane.write().remove(&pane_id);
+            }
+        }
+        if let Some(tab_id) = tab_id {
+            self.notify_tab_title_changed(tab_id);
+        }
+    }
+
     fn install_agent_metadata_runtime(
         &self,
         pane_id: PaneId,
@@ -784,6 +811,7 @@ impl Mux {
     }
 
     pub fn clear_agent_metadata(&self, pane_id: PaneId) -> Option<Arc<AgentMetadata>> {
+        self.mirrored_agent_harness_by_pane.write().remove(&pane_id);
         let tab_id = self.resolve_pane_id(pane_id).map(|(_, _, tab_id)| tab_id);
         let metadata = {
             let mut metadata_by_pane = self.agent_metadata_by_pane.write();
@@ -809,6 +837,10 @@ impl Mux {
         &self,
         pane_id: PaneId,
     ) -> Option<crate::agent::AgentHarness> {
+        if let Some(harness) = self.mirrored_agent_harness_by_pane.read().get(&pane_id) {
+            return Some(harness.clone());
+        }
+
         if let Some(runtime) = self.agent_runtime_by_pane.read().get(&pane_id) {
             if !matches!(runtime.harness, crate::agent::AgentHarness::Unknown) {
                 return Some(runtime.harness.clone());
@@ -928,6 +960,7 @@ impl Mux {
     }
 
     fn clear_detected_agent_info(&self, pane_id: PaneId) {
+        self.mirrored_agent_harness_by_pane.write().remove(&pane_id);
         self.detected_agent_panes.write().remove(&pane_id);
         if self.get_agent_metadata_for_pane(pane_id).is_none() {
             self.agent_runtime_by_pane.write().remove(&pane_id);

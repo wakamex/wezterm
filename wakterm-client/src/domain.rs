@@ -752,6 +752,7 @@ impl ClientDomain {
 
                 log::debug!("domain: {} tree: {:#?}", inner.local_domain_id, tabroot);
                 let mut workspace = None;
+                let mut pending_agent_metadata = vec![];
                 log::debug!(
                     "process_pane_list syncing pane tree for remote tab {}",
                     remote_tab_id
@@ -759,43 +760,51 @@ impl ClientDomain {
                 tab.sync_with_pane_tree(root_size, tabroot, |entry| {
                     workspace.replace(entry.workspace.clone());
                     remote_panes_to_forget.remove(&entry.pane_id);
-                    if let Some(pane_id) = inner.remote_to_local_pane_id(entry.pane_id) {
-                        match mux.get_pane(pane_id) {
-                            Some(pane) => pane,
-                            None => {
-                                // We likely decided that we hit EOF on the tab and
-                                // removed it from the mux.  Let's add it back, but
-                                // with a new id.
-                                inner.remove_old_pane_mapping(entry.pane_id);
-                                let pane: Arc<dyn Pane> = Arc::new(ClientPane::new(
-                                    &inner,
-                                    entry.tab_id,
-                                    entry.pane_id,
-                                    entry.size,
-                                    &entry.title,
-                                ));
-                                mux.add_pane(&pane).expect("failed to add pane to mux");
-                                pane
+                    let pane: Arc<dyn Pane> =
+                        if let Some(pane_id) = inner.remote_to_local_pane_id(entry.pane_id) {
+                            match mux.get_pane(pane_id) {
+                                Some(pane) => pane,
+                                None => {
+                                    // We likely decided that we hit EOF on the tab and
+                                    // removed it from the mux.  Let's add it back, but
+                                    // with a new id.
+                                    inner.remove_old_pane_mapping(entry.pane_id);
+                                    let pane: Arc<dyn Pane> = Arc::new(ClientPane::new(
+                                        &inner,
+                                        entry.tab_id,
+                                        entry.pane_id,
+                                        entry.size,
+                                        &entry.title,
+                                    ));
+                                    mux.add_pane(&pane).expect("failed to add pane to mux");
+                                    pane
+                                }
                             }
-                        }
-                    } else {
-                        let pane: Arc<dyn Pane> = Arc::new(ClientPane::new(
-                            &inner,
-                            entry.tab_id,
-                            entry.pane_id,
-                            entry.size,
-                            &entry.title,
-                        ));
-                        log::debug!(
-                            "domain: {} attaching to remote pane {:?} -> local pane_id {}",
-                            inner.local_domain_id,
-                            entry,
-                            pane.pane_id()
-                        );
-                        mux.add_pane(&pane).expect("failed to add pane to mux");
-                        pane
-                    }
+                        } else {
+                            let pane: Arc<dyn Pane> = Arc::new(ClientPane::new(
+                                &inner,
+                                entry.tab_id,
+                                entry.pane_id,
+                                entry.size,
+                                &entry.title,
+                            ));
+                            log::debug!(
+                                "domain: {} attaching to remote pane {:?} -> local pane_id {}",
+                                inner.local_domain_id,
+                                entry,
+                                pane.pane_id()
+                            );
+                            mux.add_pane(&pane).expect("failed to add pane to mux");
+                            pane
+                        };
+
+                    pending_agent_metadata.push((pane.pane_id(), entry.agent_metadata.clone()));
+
+                    pane
                 });
+                for (pane_id, metadata) in pending_agent_metadata {
+                    mux.set_mirrored_agent_harness(pane_id, metadata.as_ref());
+                }
 
                 if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {
                     let mut window = mux
