@@ -179,13 +179,13 @@ fn render_table<W: Write>(rows: &[CliListTableRow], output: &mut W) -> Result<()
     write_row(
         output,
         &[
+            ("WORKSPACE", workspace_width, Alignment::Left),
+            ("TAB", tab_width, Alignment::Left),
+            ("PANE", pane_width, Alignment::Left),
+            ("SIZE", size_width, Alignment::Right),
             ("WINID", win_width, Alignment::Right),
             ("TABID", tabid_width, Alignment::Right),
             ("PANEID", paneid_width, Alignment::Right),
-            ("WORKSPACE", workspace_width, Alignment::Left),
-            ("SIZE", size_width, Alignment::Right),
-            ("PANE", pane_width, Alignment::Left),
-            ("TAB", tab_width, Alignment::Left),
             ("CWD", cwd_width, Alignment::Left),
         ],
     )?;
@@ -194,13 +194,13 @@ fn render_table<W: Write>(rows: &[CliListTableRow], output: &mut W) -> Result<()
         write_row(
             output,
             &[
+                (&row.workspace, workspace_width, Alignment::Left),
+                (&row.tab, tab_width, Alignment::Left),
+                (&row.pane, pane_width, Alignment::Left),
+                (&row.size, size_width, Alignment::Right),
                 (&row.window_id, win_width, Alignment::Right),
                 (&row.tab_id, tabid_width, Alignment::Right),
                 (&row.pane_id, paneid_width, Alignment::Right),
-                (&row.workspace, workspace_width, Alignment::Left),
-                (&row.size, size_width, Alignment::Right),
-                (&row.pane, pane_width, Alignment::Left),
-                (&row.tab, tab_width, Alignment::Left),
                 (&row.cwd, cwd_width, Alignment::Left),
             ],
         )?;
