@@ -90,7 +90,23 @@ impl crate::TermWindow {
         };
 
         let item_to_elem = |item: &TabEntry| -> Element {
-            let title = Element::with_line(&font, &item.title, palette);
+            let bg_color = item
+                .title_bg
+                .or_else(|| first_non_default_background(&item.title))
+                .map(|c| palette.resolve_bg(c));
+            let fg_color = item
+                .title_fg
+                .or_else(|| first_non_default_foreground(&item.title))
+                .map(|c| palette.resolve_fg(c));
+            let title = Element::with_line(&font, &item.title, palette).colors(ElementColors {
+                border: BorderColor::default(),
+                bg: bg_color
+                    .map(|c| c.to_linear().into())
+                    .unwrap_or(InheritableColor::Inherited),
+                text: fg_color
+                    .map(|c| c.to_linear().into())
+                    .unwrap_or(InheritableColor::Inherited),
+            });
             let element = match item.item {
                 TabBarItem::Tab { .. } => {
                     if item.icon.is_some() {
@@ -111,15 +127,6 @@ impl crate::TermWindow {
                 }
                 _ => title,
             };
-
-            let bg_color = item
-                .title_bg
-                .or_else(|| first_non_default_background(&item.title))
-                .map(|c| palette.resolve_bg(c));
-            let fg_color = item
-                .title_fg
-                .or_else(|| first_non_default_foreground(&item.title))
-                .map(|c| palette.resolve_fg(c));
 
             let new_tab = colors.new_tab();
             let new_tab_hover = colors.new_tab_hover();
