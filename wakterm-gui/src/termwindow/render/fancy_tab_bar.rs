@@ -116,6 +116,10 @@ impl crate::TermWindow {
                 .title_bg
                 .or_else(|| first_non_default_background(&item.title))
                 .map(|c| palette.resolve_bg(c));
+            let fg_color = item
+                .title_fg
+                .or_else(|| first_non_default_foreground(&item.title))
+                .map(|c| palette.resolve_fg(c));
 
             let new_tab = colors.new_tab();
             let new_tab_hover = colors.new_tab_hover();
@@ -201,7 +205,10 @@ impl crate::TermWindow {
                             .unwrap_or_else(|| active_tab.bg_color.into())
                             .to_linear()
                             .into(),
-                        text: active_tab.fg_color.to_linear().into(),
+                        text: fg_color
+                            .unwrap_or_else(|| active_tab.fg_color.into())
+                            .to_linear()
+                            .into(),
                     }),
                 TabBarItem::Tab { .. } => element
                     .vertical_align(VerticalAlign::Bottom)
@@ -233,7 +240,10 @@ impl crate::TermWindow {
                                 bottom: bg,
                             },
                             bg: bg.into(),
-                            text: inactive_tab.fg_color.to_linear().into(),
+                            text: fg_color
+                                .unwrap_or_else(|| inactive_tab.fg_color.into())
+                                .to_linear()
+                                .into(),
                         }
                     })
                     .hover_colors({
@@ -248,7 +258,10 @@ impl crate::TermWindow {
                                 .unwrap_or_else(|| inactive_tab_hover.bg_color.into())
                                 .to_linear()
                                 .into(),
-                            text: inactive_tab_hover.fg_color.to_linear().into(),
+                            text: fg_color
+                                .unwrap_or_else(|| inactive_tab_hover.fg_color.into())
+                                .to_linear()
+                                .into(),
                         })
                     }),
                 TabBarItem::WindowButton(button) => window_button_element(
