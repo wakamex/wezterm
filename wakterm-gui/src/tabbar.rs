@@ -585,9 +585,6 @@ impl TabBarState {
                 if tab_title.title_bg.is_none() {
                     cell_attrs.set_background(termwiz::color::ColorSpec::TrueColor(*colors.bg));
                 }
-                if tab_title.title_fg.is_none() {
-                    cell_attrs.set_foreground(termwiz::color::ColorSpec::TrueColor(*colors.fg));
-                }
             }
 
             let tab_start_idx = x;

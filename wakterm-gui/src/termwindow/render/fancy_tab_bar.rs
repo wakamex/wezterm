@@ -241,17 +241,6 @@ impl crate::TermWindow {
                             .to_linear()
                             .into(),
                         text: explicit_fg_color
-                            .or_else(|| {
-                                item.assigned_color.map(|color| {
-                                    tab_render_colors(
-                                        color,
-                                        colors.background(),
-                                        TabColorVisualState::Active,
-                                    )
-                                    .fg
-                                    .into()
-                                })
-                            })
                             .unwrap_or_else(|| active_tab.fg_color.into())
                             .to_linear()
                             .into(),
@@ -309,17 +298,6 @@ impl crate::TermWindow {
                                 },
                                 bg: bg.into(),
                                 text: explicit_fg_color
-                                    .or_else(|| {
-                                        item.assigned_color.map(|color| {
-                                            tab_render_colors(
-                                                color,
-                                                colors.background(),
-                                                visual_state,
-                                            )
-                                            .fg
-                                            .into()
-                                        })
-                                    })
                                     .unwrap_or_else(|| inactive_tab.fg_color.into())
                                     .to_linear()
                                     .into(),
