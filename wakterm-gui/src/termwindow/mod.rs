@@ -551,6 +551,7 @@ pub struct TermWindow {
     scheduled_animation: RefCell<Option<Instant>>,
 
     created: Instant,
+    pending_tab_switch_paint_trace: Option<(Instant, TabId, usize)>,
 
     pub last_frame_duration: Duration,
     last_fps_check_time: Instant,
@@ -814,6 +815,7 @@ impl TermWindow {
 
         let myself = Self {
             created: Instant::now(),
+            pending_tab_switch_paint_trace: None,
             connection_name,
             last_fps_check_time: Instant::now(),
             num_frames: 0,
@@ -1227,6 +1229,17 @@ impl TermWindow {
         log::trace!("do_paint finishing frame");
         let ok = window.finish_frame(frame).is_ok();
         log::trace!("do_paint finish_frame complete ok={ok}");
+        if ok {
+            if let Some((started, tab_id, tab_idx)) = self.pending_tab_switch_paint_trace.take() {
+                log::info!(
+                    "tab_latency action=activate-tab-paint window_id={} tab_idx={} tab_id={} total_ms={:.1}",
+                    self.mux_window_id,
+                    tab_idx,
+                    tab_id,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
         ok
     }
 
@@ -2350,6 +2363,7 @@ impl TermWindow {
                     tab_id,
                     started.elapsed().as_secs_f64() * 1000.0
                 );
+                self.pending_tab_switch_paint_trace = Some((Instant::now(), tab_id, tab_idx));
             }
 
             if let Some(tab) = self.get_active_pane_or_overlay() {
