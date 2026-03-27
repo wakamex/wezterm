@@ -3694,6 +3694,17 @@ impl TermWindow {
             .map(|(idx, tab)| {
                 let panes = self.get_pos_panes_for_tab(tab);
                 let active_pane = panes.iter().find(|p| p.is_active);
+                let harness_icon = active_pane
+                    .and_then(|pos| {
+                        mux.cached_agent_harness_for_pane(pos.pane.pane_id())
+                            .and_then(TabHarnessIcon::from_agent_harness)
+                    })
+                    .or_else(|| {
+                        panes.iter().find_map(|pos| {
+                            mux.cached_agent_harness_for_pane(pos.pane.pane_id())
+                                .and_then(TabHarnessIcon::from_agent_harness)
+                        })
+                    });
 
                 TabInformation {
                     tab_index: idx,
@@ -3702,10 +3713,7 @@ impl TermWindow {
                     is_last_active: last_active_idx == Some(idx),
                     window_id: self.mux_window_id,
                     tab_title: mux.effective_tab_title(tab.tab_id()),
-                    harness_icon: active_pane.and_then(|pos| {
-                        mux.cached_agent_harness_for_pane(pos.pane.pane_id())
-                            .and_then(TabHarnessIcon::from_agent_harness)
-                    }),
+                    harness_icon,
                     assigned_color: None,
                     active_pane: active_pane.map(Self::pos_pane_to_pane_info),
                 }
