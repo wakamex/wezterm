@@ -18,7 +18,7 @@ For example:
 
 ```lua
 config.tab_bar_color_intensity = {
-  active = 1.0,
+  active = 0.6,
   hover = 0.7,
   inactive = 0.5,
 }
@@ -28,8 +28,8 @@ The defaults are:
 
 ```lua
 config.tab_bar_color_intensity = {
-  active = 1.0,
-  hover = 0.6,
+  active = 0.6,
+  hover = 0.5,
   inactive = 0.4,
 }
 ```

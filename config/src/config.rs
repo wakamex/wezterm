@@ -1962,7 +1962,7 @@ impl_lua_conversion_dynamic!(TabBarColorPalette);
 
 #[derive(FromDynamic, ToDynamic, Clone, Copy, Debug, PartialEq)]
 pub struct TabBarColorIntensity {
-    #[dynamic(default = "default_one_point_oh")]
+    #[dynamic(default = "default_tab_bar_color_active_intensity")]
     pub active: f32,
     #[dynamic(default = "default_tab_bar_color_hover_intensity")]
     pub hover: f32,
@@ -1973,7 +1973,7 @@ pub struct TabBarColorIntensity {
 impl Default for TabBarColorIntensity {
     fn default() -> Self {
         Self {
-            active: default_one_point_oh(),
+            active: default_tab_bar_color_active_intensity(),
             hover: default_tab_bar_color_hover_intensity(),
             inactive: default_tab_bar_color_inactive_intensity(),
         }
@@ -1996,8 +1996,12 @@ impl DefaultCursorStyle {
     }
 }
 
-const fn default_tab_bar_color_hover_intensity() -> f32 {
+const fn default_tab_bar_color_active_intensity() -> f32 {
     0.6
+}
+
+const fn default_tab_bar_color_hover_intensity() -> f32 {
+    0.5
 }
 
 const fn default_tab_bar_color_inactive_intensity() -> f32 {
