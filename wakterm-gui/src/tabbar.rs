@@ -549,13 +549,15 @@ impl TabBarState {
             };
 
             let assigned_colors = tab_info[tab_idx].assigned_color.and_then(|color| {
+                if active {
+                    return None;
+                }
+
                 if tab_title.title_bg.is_some() && tab_title.title_fg.is_some() {
                     return None;
                 }
 
-                let state = if active {
-                    TabColorVisualState::Active
-                } else if hover {
+                let state = if hover {
                     TabColorVisualState::Hover
                 } else {
                     TabColorVisualState::Inactive

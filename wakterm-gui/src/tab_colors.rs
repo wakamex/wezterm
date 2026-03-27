@@ -22,7 +22,6 @@ lazy_static! {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabColorVisualState {
-    Active,
     Hover,
     Inactive,
 }
@@ -95,7 +94,6 @@ pub fn tab_render_colors(
     state: TabColorVisualState,
 ) -> TabRenderColors {
     let bg = match state {
-        TabColorVisualState::Active => base,
         TabColorVisualState::Hover => mix_srgba(base, bar_background, 0.12),
         TabColorVisualState::Inactive => mix_srgba(base, bar_background, 0.24),
     };
