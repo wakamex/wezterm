@@ -2338,7 +2338,19 @@ impl TermWindow {
                 .map(|tab| tab.tab_id())
                 .ok_or_else(|| anyhow!("no such tab index {tab_idx}"))?;
             drop(window);
+            let started = std::env::var_os("WAKTERM_TRACE_TAB_LATENCY")
+                .is_some()
+                .then(Instant::now);
             mux.set_active_tab_for_current_identity(self.mux_window_id, tab_id)?;
+            if let Some(started) = started {
+                log::info!(
+                    "tab_latency action=activate-tab window_id={} tab_idx={} tab_id={} mux_ms={:.1}",
+                    self.mux_window_id,
+                    tab_idx,
+                    tab_id,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
 
             if let Some(tab) = self.get_active_pane_or_overlay() {
                 tab.focus_changed(true);

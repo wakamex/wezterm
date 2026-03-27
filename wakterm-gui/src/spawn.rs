@@ -8,6 +8,7 @@ use mux::window::WindowId as MuxWindowId;
 use mux::Mux;
 use portable_pty::CommandBuilder;
 use std::sync::Arc;
+use std::time::Instant;
 use wakterm_term::TerminalSize;
 
 #[derive(Copy, Debug, Clone, Eq, PartialEq)]
@@ -122,6 +123,9 @@ pub async fn spawn_command_internal(
             }
         }
         _ => {
+            let started = std::env::var_os("WAKTERM_TRACE_TAB_LATENCY")
+                .is_some()
+                .then(Instant::now);
             let (_tab, pane, window_id) = mux
                 .spawn_tab_or_window(
                     match spawn_where {
@@ -138,6 +142,20 @@ pub async fn spawn_command_internal(
                 )
                 .await
                 .context("spawn_tab_or_window")?;
+            if let Some(started) = started {
+                let action = match spawn_where {
+                    SpawnWhere::NewWindow => "spawn-window",
+                    SpawnWhere::NewTab => "spawn-tab",
+                    SpawnWhere::SplitPane(_) => "spawn-other",
+                };
+                log::info!(
+                    "tab_latency action={} window_id={} pane_id={} mux_ms={:.1}",
+                    action,
+                    window_id,
+                    pane.pane_id(),
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
 
             // If it was created in this window, it copies our handlers.
             // Otherwise, we'll pick them up when we later respond to
