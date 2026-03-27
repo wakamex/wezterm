@@ -446,7 +446,7 @@ fn assignment_cache_path() -> PathBuf {
 }
 
 fn inactive_text() -> RgbaColor {
-    RgbaColor::from(SrgbaTuple(0.73333335, 0.73333335, 0.73333335, 1.0))
+    RgbaColor::from(SrgbaTuple(0.5019608, 0.5019608, 0.5019608, 1.0))
 }
 
 fn active_text() -> RgbaColor {
@@ -454,7 +454,7 @@ fn active_text() -> RgbaColor {
 }
 
 fn hover_text() -> RgbaColor {
-    RgbaColor::from(SrgbaTuple(0.8666667, 0.8666667, 0.8666667, 1.0))
+    RgbaColor::from(SrgbaTuple(0.5647059, 0.5647059, 0.5647059, 1.0))
 }
 
 fn light_text() -> RgbaColor {
