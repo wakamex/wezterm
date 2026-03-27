@@ -22,6 +22,7 @@ lazy_static! {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabColorVisualState {
+    Active,
     Hover,
     Inactive,
 }
@@ -90,15 +91,17 @@ fn tab_bar_background(config: &ConfigHandle) -> RgbaColor {
 
 pub fn tab_render_colors(
     base: RgbaColor,
-    bar_background: RgbaColor,
+    _bar_background: RgbaColor,
     state: TabColorVisualState,
 ) -> TabRenderColors {
     let bg = match state {
-        TabColorVisualState::Hover => mix_srgba(base, bar_background, 0.12),
-        TabColorVisualState::Inactive => mix_srgba(base, bar_background, 0.24),
+        TabColorVisualState::Active => base,
+        TabColorVisualState::Hover => dim_srgba(base, 0.6),
+        TabColorVisualState::Inactive => dim_srgba(base, 0.4),
     };
 
     let fg = match state {
+        TabColorVisualState::Active => active_text(),
         TabColorVisualState::Hover => hover_text(),
         TabColorVisualState::Inactive => inactive_text(),
     };
@@ -246,17 +249,17 @@ fn choose_most_distinct_color(
 fn min_color_distance(
     candidate: RgbaColor,
     existing: &[RgbaColor],
-    bar_background: RgbaColor,
+    _bar_background: RgbaColor,
 ) -> f32 {
     if existing.is_empty() {
         return f32::MAX;
     }
 
-    let candidate = inactive_rendered_bg(candidate, bar_background);
+    let candidate = inactive_rendered_bg(candidate);
     existing
         .iter()
         .copied()
-        .map(|existing| color_distance(candidate, inactive_rendered_bg(existing, bar_background)))
+        .map(|existing| color_distance(candidate, inactive_rendered_bg(existing)))
         .fold(f32::INFINITY, f32::min)
 }
 
@@ -281,7 +284,7 @@ fn circular_distance(a: usize, b: usize, len: usize) -> usize {
     forward.min(wrap)
 }
 
-fn candidate_palette(kind: TabBarColorPalette, bar_background: RgbaColor) -> Vec<RgbaColor> {
+fn candidate_palette(kind: TabBarColorPalette, _bar_background: RgbaColor) -> Vec<RgbaColor> {
     let mut colors = match kind {
         TabBarColorPalette::Dark => curated_dark_palette(),
         TabBarColorPalette::Light => build_oklch_slice(
@@ -304,9 +307,7 @@ fn candidate_palette(kind: TabBarColorPalette, bar_background: RgbaColor) -> Vec
 
     colors.retain(|color| match kind {
         TabBarColorPalette::Dark => true,
-        TabBarColorPalette::Light => {
-            prefers_dark_text(inactive_rendered_bg(*color, bar_background))
-        }
+        TabBarColorPalette::Light => prefers_dark_text(inactive_rendered_bg(*color)),
         TabBarColorPalette::Mixed => true,
     });
 
@@ -354,8 +355,14 @@ fn hex_color(hex: &str) -> RgbaColor {
     RgbaColor::from((r, g, b))
 }
 
-fn inactive_rendered_bg(base: RgbaColor, bar_background: RgbaColor) -> RgbaColor {
-    mix_srgba(base, bar_background, 0.24)
+fn inactive_rendered_bg(base: RgbaColor) -> RgbaColor {
+    dim_srgba(base, 0.4)
+}
+
+fn dim_srgba(color: RgbaColor, factor: f32) -> RgbaColor {
+    let factor = factor.clamp(0.0, 1.0);
+    let SrgbaTuple(r, g, b, a) = *color;
+    RgbaColor::from(SrgbaTuple(r * factor, g * factor, b * factor, a))
 }
 
 fn oklch_to_rgba(lightness: f32, chroma: f32, hue: f32) -> Option<RgbaColor> {
@@ -384,18 +391,6 @@ fn oklch_to_rgba(lightness: f32, chroma: f32, hue: f32) -> Option<RgbaColor> {
         linear_channel_to_srgb(b),
         1.0,
     )))
-}
-
-fn mix_srgba(a: RgbaColor, b: RgbaColor, amount: f32) -> RgbaColor {
-    let amount = amount.clamp(0.0, 1.0);
-    let SrgbaTuple(ar, ag, ab, aa) = *a;
-    let SrgbaTuple(br, bg, bb, ba) = *b;
-    RgbaColor::from(SrgbaTuple(
-        ar + (br - ar) * amount,
-        ag + (bg - ag) * amount,
-        ab + (bb - ab) * amount,
-        aa + (ba - aa) * amount,
-    ))
 }
 
 fn prefers_dark_text(color: RgbaColor) -> bool {
@@ -452,6 +447,10 @@ fn assignment_cache_path() -> PathBuf {
 
 fn inactive_text() -> RgbaColor {
     RgbaColor::from(SrgbaTuple(0.73333335, 0.73333335, 0.73333335, 1.0))
+}
+
+fn active_text() -> RgbaColor {
+    RgbaColor::from(SrgbaTuple(0.11764706, 0.11764706, 0.18039216, 1.0))
 }
 
 fn hover_text() -> RgbaColor {
@@ -551,9 +550,9 @@ impl AssignmentStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        assign_colors_for_keys, candidate_palette, choose_most_distinct_color, cwd_key_from_url,
-        hover_text, inactive_rendered_bg, inactive_text, oklch_to_rgba, prefers_dark_text,
-        stable_tab_key, tab_bar_background, tab_render_colors, AssignmentStore,
+        active_text, assign_colors_for_keys, candidate_palette, choose_most_distinct_color,
+        cwd_key_from_url, hover_text, inactive_rendered_bg, inactive_text, oklch_to_rgba,
+        prefers_dark_text, stable_tab_key, tab_bar_background, tab_render_colors, AssignmentStore,
     };
     use crate::termwindow::{PaneInformation, TabInformation};
     use config::{ConfigHandle, RgbaColor, TabBarColorPalette};
@@ -701,7 +700,17 @@ mod tests {
         assert!(candidate_palette(TabBarColorPalette::Light, background)
             .iter()
             .copied()
-            .all(|color| prefers_dark_text(inactive_rendered_bg(color, background))));
+            .all(|color| prefers_dark_text(inactive_rendered_bg(color))));
+    }
+
+    #[test]
+    fn active_tab_render_colors_use_fixed_lua_foreground() {
+        let rendered = tab_render_colors(
+            RgbaColor::from((40, 133, 239)),
+            tab_bar_background(&ConfigHandle::default_config()),
+            super::TabColorVisualState::Active,
+        );
+        assert_eq!(rendered.fg, active_text());
     }
 
     #[test]
@@ -712,6 +721,10 @@ mod tests {
             super::TabColorVisualState::Inactive,
         );
         assert_eq!(rendered.fg, inactive_text());
+        assert_eq!(
+            rendered.bg,
+            inactive_rendered_bg(RgbaColor::from((255, 146, 126)))
+        );
     }
 
     #[test]
