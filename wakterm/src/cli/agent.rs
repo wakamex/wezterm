@@ -1065,7 +1065,7 @@ impl ListAgentsCommand {
                             harness_label(&agent.runtime.harness),
                             transport_label(&agent.runtime.transport),
                             agent.metadata.declared_cwd.clone(),
-                            inline_progress_summary(agent),
+                            inline_progress_summary_for_table(agent),
                             agent.metadata.launch_cmd.clone(),
                         ]
                     })
@@ -2295,6 +2295,19 @@ fn inline_progress_summary(agent: &AgentSnapshot) -> String {
     }
 }
 
+fn inline_progress_summary_for_table(agent: &AgentSnapshot) -> String {
+    const MAX_CHARS: usize = 96;
+
+    let summary = inline_progress_summary(agent);
+    let mut chars = summary.chars();
+    let truncated: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        summary
+    }
+}
+
 fn inline_progress_detail(agent: &AgentSnapshot) -> Option<String> {
     let summary = inline_progress_summary(agent);
     if summary.is_empty() {
@@ -2715,6 +2728,16 @@ mod test {
             inline_progress_summary(&agent),
             "[plan aborted] attention: turn-aborted"
         );
+    }
+
+    #[test]
+    fn inline_progress_summary_for_table_truncates_long_values() {
+        let mut agent = sample_agent(30, "reviewer");
+        agent.runtime.progress_summary = Some("x".repeat(200));
+
+        let summary = inline_progress_summary_for_table(&agent);
+        assert!(summary.len() <= 99);
+        assert!(summary.ends_with("..."));
     }
 
     #[test]
