@@ -1,5 +1,5 @@
 use crate::agent::{
-    adopted_agent_runtime_matches_process, default_launch_cmd_for_harness, derive_runtime_status,
+    adopted_agent_matches_process_info, default_launch_cmd_for_harness, derive_runtime_status,
     detect_harness_process, finalize_runtime_snapshot, infer_harness, prime_runtime_for_new_agent,
     refresh_runtime_from_harness, AgentMetadata, AgentOrigin, AgentRuntimeSnapshot, AgentSnapshot,
     AgentTabBadgeState,
@@ -177,6 +177,8 @@ struct DetectedAgentState {
     domain_id: DomainId,
     launch_cmd: String,
     declared_cwd: String,
+    adopted_pid: Option<u32>,
+    adopted_start_time: Option<u64>,
     runtime: AgentRuntimeSnapshot,
     detection_source: String,
 }
@@ -735,7 +737,7 @@ impl Mux {
     fn install_agent_metadata_runtime(
         &self,
         pane_id: PaneId,
-        metadata: AgentMetadata,
+        mut metadata: AgentMetadata,
         runtime: AgentRuntimeSnapshot,
     ) -> anyhow::Result<()> {
         self.detected_agent_panes.write().remove(&pane_id);
@@ -743,9 +745,11 @@ impl Mux {
             .get_pane(pane_id)
             .ok_or_else(|| anyhow!("pane {} is invalid", pane_id))?;
         let foreground_process_name = pane.get_foreground_process_name(CachePolicy::AllowStale);
+        let foreground_process_info = pane.get_foreground_process_info(CachePolicy::AllowStale);
         let tty_name = pane.tty_name();
         let terminal_progress = pane.get_progress();
         let alive = !pane.is_dead();
+        Self::stamp_adopted_process_identity(&mut metadata, foreground_process_info.as_ref());
 
         let mut names = self.agent_panes_by_name.write();
         let mut metadata_by_pane = self.agent_metadata_by_pane.write();
@@ -976,6 +980,14 @@ impl Mux {
         }
     }
 
+    fn stamp_adopted_process_identity(
+        metadata: &mut AgentMetadata,
+        process_info: Option<&procinfo::LocalProcessInfo>,
+    ) {
+        metadata.adopted_pid = process_info.map(|process| process.pid);
+        metadata.adopted_start_time = process_info.map(|process| process.start_time);
+    }
+
     fn detect_agent_state_for_pane(&self, pane_id: PaneId) -> Option<DetectedAgentState> {
         if self.get_agent_metadata_for_pane(pane_id).is_some() {
             self.detected_agent_panes.write().remove(&pane_id);
@@ -1043,6 +1055,10 @@ impl Mux {
             name: format!("detected-{pane_id}"),
             launch_cmd,
             declared_cwd,
+            adopted_pid: foreground_process_info.as_ref().map(|process| process.pid),
+            adopted_start_time: foreground_process_info
+                .as_ref()
+                .map(|process| process.start_time),
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -1101,6 +1117,8 @@ impl Mux {
             domain_id: pane.domain_id(),
             launch_cmd: metadata.launch_cmd,
             declared_cwd: metadata.declared_cwd,
+            adopted_pid: metadata.adopted_pid,
+            adopted_start_time: metadata.adopted_start_time,
             runtime,
             detection_source,
         })
@@ -1117,6 +1135,8 @@ impl Mux {
                 name,
                 launch_cmd: state.launch_cmd,
                 declared_cwd: state.declared_cwd,
+                adopted_pid: state.adopted_pid,
+                adopted_start_time: state.adopted_start_time,
                 created_at,
                 repo_root: None,
                 worktree: None,
@@ -1169,6 +1189,8 @@ impl Mux {
             name,
             launch_cmd: state.launch_cmd,
             declared_cwd: state.declared_cwd,
+            adopted_pid: state.adopted_pid,
+            adopted_start_time: state.adopted_start_time,
             created_at,
             repo_root: None,
             worktree: None,
@@ -1830,7 +1852,8 @@ impl Mux {
     ) -> Option<AgentSnapshot> {
         let pane = self.get_pane(pane_id)?;
         let runtime = self.runtime_snapshot_for_agent(pane_id, metadata.as_ref(), &pane);
-        if !adopted_agent_runtime_matches_process(metadata.as_ref(), &runtime)
+        let foreground_process_info = pane.get_foreground_process_info(CachePolicy::AllowStale);
+        if !adopted_agent_matches_process_info(metadata.as_ref(), foreground_process_info.as_ref())
             && runtime.session_path.is_none()
         {
             self.clear_agent_metadata(pane_id);
@@ -1890,6 +1913,8 @@ impl Mux {
                 name,
                 launch_cmd,
                 declared_cwd,
+                adopted_pid: None,
+                adopted_start_time: None,
                 created_at,
                 repo_root: None,
                 worktree: None,
@@ -4066,6 +4091,8 @@ mod test {
             name: name.to_string(),
             launch_cmd: "codex".to_string(),
             declared_cwd: format!("file:///tmp/{name}"),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
             repo_root: None,
             worktree: None,
@@ -4667,6 +4694,8 @@ mod test {
                 name: "throttle".to_string(),
                 launch_cmd: "codex".to_string(),
                 declared_cwd: "/tmp/throttle-project".to_string(),
+                adopted_pid: None,
+                adopted_start_time: None,
                 created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
                 repo_root: None,
                 worktree: None,
@@ -4783,6 +4812,8 @@ mod test {
                 name: "restore".to_string(),
                 launch_cmd: "codex".to_string(),
                 declared_cwd: "/tmp/restore-agent-project".to_string(),
+                adopted_pid: None,
+                adopted_start_time: None,
                 created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
                 repo_root: None,
                 worktree: None,
@@ -4879,6 +4910,8 @@ mod test {
                 name: "list-agents".to_string(),
                 launch_cmd: "codex".to_string(),
                 declared_cwd: "/tmp/list-agents-project".to_string(),
+                adopted_pid: None,
+                adopted_start_time: None,
                 created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
                 repo_root: None,
                 worktree: None,
@@ -4985,6 +5018,8 @@ mod test {
                 name: "list-agents-cached".to_string(),
                 launch_cmd: "codex".to_string(),
                 declared_cwd: "/tmp/list-agents-cached-project".to_string(),
+                adopted_pid: None,
+                adopted_start_time: None,
                 created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
                 repo_root: None,
                 worktree: None,
@@ -5085,6 +5120,8 @@ mod test {
                 name: "refresh-tab".to_string(),
                 launch_cmd: "codex".to_string(),
                 declared_cwd: "/tmp/refresh-tab-project".to_string(),
+                adopted_pid: None,
+                adopted_start_time: None,
                 created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
                 repo_root: None,
                 worktree: None,

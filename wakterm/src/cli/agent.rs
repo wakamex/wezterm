@@ -400,6 +400,8 @@ impl SpawnAgentCommand {
             name: agent_name.clone(),
             launch_cmd: prepared.launch_cmd.clone(),
             declared_cwd: prepared.command_dir.clone(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: prepared.repo_root.clone(),
             worktree: prepared.worktree.clone(),
@@ -1686,6 +1688,8 @@ impl AdoptDetectedAgentCommand {
             name: name.to_string(),
             launch_cmd: detected.metadata.launch_cmd.clone(),
             declared_cwd,
+            adopted_pid: detected.metadata.adopted_pid,
+            adopted_start_time: detected.metadata.adopted_start_time,
             created_at: detected.metadata.created_at,
             repo_root: detected.metadata.repo_root.clone(),
             worktree: detected.metadata.worktree.clone(),
@@ -2037,6 +2041,8 @@ fn build_agent_metadata(
             .or_else(|| existing.map(|agent| agent.metadata.declared_cwd.clone()))
             .or_else(|| find_pane_cwd(panes, pane_id))
             .ok_or_else(|| anyhow::anyhow!("unable to determine cwd; pass --cwd"))?,
+        adopted_pid: existing.and_then(|agent| agent.metadata.adopted_pid),
+        adopted_start_time: existing.and_then(|agent| agent.metadata.adopted_start_time),
         created_at: existing
             .map(|agent| agent.metadata.created_at)
             .unwrap_or_else(Utc::now),

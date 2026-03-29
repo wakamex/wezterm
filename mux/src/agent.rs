@@ -19,6 +19,10 @@ pub struct AgentMetadata {
     pub name: String,
     pub launch_cmd: String,
     pub declared_cwd: String,
+    #[serde(default)]
+    pub adopted_pid: Option<u32>,
+    #[serde(default)]
+    pub adopted_start_time: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub repo_root: Option<String>,
     pub worktree: Option<String>,
@@ -329,25 +333,20 @@ fn harness_process_is_compatible(
     }
 }
 
-pub fn adopted_agent_runtime_matches_process(
+pub fn adopted_agent_matches_process_info(
     metadata: &AgentMetadata,
-    runtime: &AgentRuntimeSnapshot,
+    process: Option<&LocalProcessInfo>,
 ) -> bool {
-    let configured_harness = infer_harness(&metadata.launch_cmd, None);
-    if matches!(configured_harness, AgentHarness::Unknown) {
+    let Some(adopted_pid) = metadata.adopted_pid else {
         return true;
-    }
-
-    if runtime.foreground_process_name.is_none() {
+    };
+    let Some(adopted_start_time) = metadata.adopted_start_time else {
         return true;
-    }
-
-    let process_harness = infer_harness("", runtime.foreground_process_name.as_deref());
-    harness_process_is_compatible(
-        &configured_harness,
-        &process_harness,
-        runtime.foreground_process_name.as_deref(),
-    )
+    };
+    let Some(process) = process else {
+        return true;
+    };
+    process.pid == adopted_pid && process.start_time == adopted_start_time
 }
 
 pub fn derive_runtime_status(runtime: &AgentRuntimeSnapshot) -> AgentStatus {
@@ -2020,6 +2019,8 @@ mod test {
             name: "alpha".to_string(),
             launch_cmd: "codex".to_string(),
             declared_cwd: "/tmp/alpha".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -2049,6 +2050,8 @@ mod test {
             name: "alpha".to_string(),
             launch_cmd: "codex".to_string(),
             declared_cwd: "/tmp/alpha".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -2096,6 +2099,8 @@ mod test {
             name: "gemini".to_string(),
             launch_cmd: "gemini".to_string(),
             declared_cwd: "/tmp/project-m".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -2123,6 +2128,8 @@ mod test {
             name: "alpha".to_string(),
             launch_cmd: "codex".to_string(),
             declared_cwd: "/tmp/project-n".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -2579,6 +2586,8 @@ mod test {
             name: "gemini".to_string(),
             launch_cmd: "gemini".to_string(),
             declared_cwd: gemini_cwd.to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -2646,6 +2655,8 @@ mod test {
             name: "opencode".to_string(),
             launch_cmd: "opencode".to_string(),
             declared_cwd: "/tmp/project-l".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -2685,6 +2696,8 @@ mod test {
             name: "alpha".to_string(),
             launch_cmd: "claude".to_string(),
             declared_cwd: cwd.to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -2729,6 +2742,8 @@ mod test {
             name: "delta".to_string(),
             launch_cmd: "codex".to_string(),
             declared_cwd: "/tmp/project-d".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
@@ -2757,6 +2772,8 @@ mod test {
             name: "delta".to_string(),
             launch_cmd: "claude".to_string(),
             declared_cwd: "/tmp/project-d".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
             repo_root: None,
             worktree: None,
@@ -2783,6 +2800,8 @@ mod test {
             name: "delta".to_string(),
             launch_cmd: "codex".to_string(),
             declared_cwd: "/tmp/project-d".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
             repo_root: None,
             worktree: None,
@@ -2830,6 +2849,8 @@ mod test {
             name: "hotel".to_string(),
             launch_cmd: "codex".to_string(),
             declared_cwd: "/tmp/project-h".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc::now(),
             repo_root: None,
             worktree: None,
