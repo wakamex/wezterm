@@ -1406,6 +1406,19 @@ impl Mux {
     }
 
     pub fn record_agent_output(&self, pane_id: PaneId) {
+        if self.get_agent_metadata_for_pane(pane_id).is_none() {
+            let before_detected = self.detected_agent_panes.read().contains(&pane_id);
+            let detected = self.detect_agent_state_for_pane(pane_id);
+            if Self::agent_auto_adopt_on_confirmed_session_match() {
+                self.maybe_auto_adopt_detected_agent(pane_id);
+            }
+            if let Some(state) = detected {
+                if !before_detected {
+                    self.notify_tab_title_changed(state.tab_id);
+                }
+            }
+            return;
+        }
         self.refresh_agent_runtime_for_pane_with_update(
             pane_id,
             true,
@@ -4556,6 +4569,57 @@ mod test {
         mux.notify(MuxNotification::PaneOutput(pane_id));
 
         assert_eq!(*title_changes.lock(), 0);
+    }
+
+    #[test]
+    fn pane_output_detects_agent_without_list_command() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new_detected(
+            144,
+            size,
+            domain.id,
+            "codex",
+            "/tmp/pane-output-detect",
+            "/usr/bin/codex",
+            &["codex"],
+        );
+        let pane_id = pane.pane_id();
+        let tab_id = tab.tab_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let title_changes = std::sync::Arc::new(Mutex::new(0usize));
+        let title_changes_for_sub = std::sync::Arc::clone(&title_changes);
+        mux.subscribe(move |notification| {
+            if matches!(notification, MuxNotification::TabTitleChanged { tab_id: changed, .. } if changed == tab_id)
+            {
+                *title_changes_for_sub.lock() += 1;
+            }
+            true
+        });
+
+        mux.notify(MuxNotification::PaneOutput(pane_id));
+
+        assert!(mux.detected_agent_panes.read().contains(&pane_id));
+        assert!(mux.agent_runtime_by_pane.read().get(&pane_id).is_some());
+        assert_eq!(*title_changes.lock(), 1);
     }
 
     #[test]
