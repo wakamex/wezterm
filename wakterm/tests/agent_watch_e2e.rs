@@ -208,6 +208,79 @@ fn agent_watch_smoke_with_real_harnesses_headless() {
     }
 }
 
+#[test]
+#[ignore = "requires locally installed/authenticated opencode harness with a free model"]
+fn opencode_auto_adopt_transitions_from_detected_to_adopted() {
+    let runtime = tempfile::tempdir().expect("tempdir");
+    let socket = runtime.path().join("wakterm/sock");
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let suffix = unique_suffix();
+    let workspace = format!("opencode-auto-adopt-{suffix}");
+    let expected_text = format!("opencode auto adopt {suffix}");
+
+    let _server = start_mux_server(runtime.path());
+    wait_for_mux_ready(&socket);
+
+    let pane_id = run_cli_text(
+        &socket,
+        workspace_root,
+        [
+            "spawn",
+            "--new-window",
+            "--workspace",
+            workspace.as_str(),
+            "--cwd",
+            workspace_root.to_str().expect("utf8 workspace path"),
+            "--",
+            "opencode",
+            "-m",
+            first_free_opencode_model().as_str(),
+        ],
+    );
+    let pane_id = pane_id
+        .trim()
+        .parse::<u64>()
+        .expect("spawn pane id to be numeric");
+
+    let detected =
+        wait_for_agent_snapshot(&socket, workspace_root, Duration::from_secs(45), |agent| {
+            agent["pane_id"].as_u64() == Some(pane_id)
+                && agent["origin"].as_str() == Some("detected")
+                && agent["runtime"]["transport"].as_str() == Some("PlainPty")
+        });
+    assert_eq!(detected["runtime"]["harness"].as_str(), Some("Opencode"));
+
+    let send = run_cli_text(
+        &socket,
+        workspace_root,
+        [
+            "send-text",
+            "--pane-id",
+            pane_id.to_string().as_str(),
+            format!(
+                "Reply with exactly the following text and nothing else: {}\n",
+                expected_text
+            )
+            .as_str(),
+        ],
+    );
+    assert!(send.trim().is_empty(), "send-text output: {}", send);
+
+    let adopted =
+        wait_for_agent_snapshot(&socket, workspace_root, Duration::from_secs(90), |agent| {
+            agent["pane_id"].as_u64() == Some(pane_id)
+                && agent["origin"].as_str() == Some("adopted")
+                && agent["runtime"]["transport"].as_str() == Some("ObservedPty")
+                && agent["runtime"]["session_path"]
+                    .as_str()
+                    .map(|path| !path.is_empty())
+                    .unwrap_or(false)
+        });
+    assert_eq!(adopted["runtime"]["harness"].as_str(), Some("Opencode"));
+}
+
 fn start_mux_server(runtime_dir: &Path) -> ChildGuard {
     let mut command = Command::new(mux_server_bin());
     command
@@ -319,16 +392,39 @@ where
     );
 }
 
+fn wait_for_agent_snapshot<F>(
+    socket: &Path,
+    current_dir: &Path,
+    timeout: Duration,
+    predicate: F,
+) -> Value
+where
+    F: Fn(&Value) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    let mut recent_agents = vec![];
+    while Instant::now() < deadline {
+        let agents = run_cli_json(socket, current_dir, ["agent", "list", "--format", "json"]);
+        let list = agents.as_array().cloned().unwrap_or_default();
+        recent_agents = list.clone();
+        if let Some(agent) = list.into_iter().find(|agent| predicate(agent)) {
+            return agent;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    panic!(
+        "timed out waiting for agent snapshot; recent agents: {:#?}",
+        recent_agents
+    );
+}
+
 fn run_cli_json<I, S>(socket: &Path, current_dir: &Path, args: I) -> Value
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = base_cli_command(socket, current_dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run wakterm cli");
+    let output = run_cli_output(socket, current_dir, args);
     assert!(
         output.status.success(),
         "wakterm cli failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
@@ -342,6 +438,34 @@ where
             String::from_utf8_lossy(&output.stdout)
         )
     })
+}
+
+fn run_cli_text<I, S>(socket: &Path, current_dir: &Path, args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = run_cli_output(socket, current_dir, args);
+    assert!(
+        output.status.success(),
+        "wakterm cli failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf8 cli output")
+}
+
+fn run_cli_output<I, S>(socket: &Path, current_dir: &Path, args: I) -> std::process::Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    base_cli_command(socket, current_dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run wakterm cli")
 }
 
 #[derive(Debug, Deserialize)]
