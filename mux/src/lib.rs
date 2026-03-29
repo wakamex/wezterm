@@ -1,6 +1,6 @@
 use crate::agent::{
-    default_launch_cmd_for_harness, derive_runtime_status, detect_harness_process,
-    finalize_runtime_snapshot, infer_harness, prime_runtime_for_new_agent,
+    adopted_agent_runtime_matches_process, default_launch_cmd_for_harness, derive_runtime_status,
+    detect_harness_process, finalize_runtime_snapshot, infer_harness, prime_runtime_for_new_agent,
     refresh_runtime_from_harness, AgentMetadata, AgentOrigin, AgentRuntimeSnapshot, AgentSnapshot,
     AgentTabBadgeState,
 };
@@ -1830,6 +1830,12 @@ impl Mux {
     ) -> Option<AgentSnapshot> {
         let pane = self.get_pane(pane_id)?;
         let runtime = self.runtime_snapshot_for_agent(pane_id, metadata.as_ref(), &pane);
+        if !adopted_agent_runtime_matches_process(metadata.as_ref(), &runtime)
+            && runtime.session_path.is_none()
+        {
+            self.clear_agent_metadata(pane_id);
+            return None;
+        }
         self.snapshot_with_runtime(
             pane_id,
             (*metadata).clone(),
@@ -4146,6 +4152,75 @@ mod test {
         assert_eq!(agents[0].workspace, DEFAULT_WORKSPACE);
 
         mux.remove_pane(pane_id);
+        assert!(mux.list_agents().is_empty());
+        assert!(mux.get_agent_metadata_for_pane(pane_id).is_none());
+    }
+
+    #[test]
+    fn adopted_agent_is_cleared_when_harness_exits_back_to_shell() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new_detected(
+            41,
+            size,
+            domain.id,
+            "claude",
+            "/tmp/claude-exit",
+            "/usr/bin/claude",
+            &["claude"],
+        );
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_agent_metadata(
+            pane_id,
+            AgentMetadata {
+                launch_cmd: "claude".to_string(),
+                declared_cwd: "/tmp/claude-exit".to_string(),
+                ..sample_agent_metadata("claude-exit")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(mux.list_agents().len(), 1);
+
+        let shell_pane: Arc<dyn Pane> = Arc::new(FakePane {
+            id: pane_id,
+            size: Mutex::new(size),
+            domain_id: domain.id,
+            title: "zsh".to_string(),
+            cwd: Some(Url::from_file_path("/tmp/claude-exit").unwrap()),
+            foreground_process_name: Some("/usr/bin/zsh".to_string()),
+            foreground_process_info: Some(LocalProcessInfo {
+                pid: 2,
+                ppid: 0,
+                name: "zsh".to_string(),
+                executable: PathBuf::from("/usr/bin/zsh"),
+                argv: vec!["zsh".to_string()],
+                cwd: PathBuf::from("/tmp/claude-exit"),
+                status: LocalProcessStatus::Run,
+                start_time: 1,
+                children: HashMap::new(),
+            }),
+        });
+        mux.panes.write().insert(pane_id, shell_pane);
+
         assert!(mux.list_agents().is_empty());
         assert!(mux.get_agent_metadata_for_pane(pane_id).is_none());
     }

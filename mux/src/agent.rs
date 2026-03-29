@@ -329,6 +329,27 @@ fn harness_process_is_compatible(
     }
 }
 
+pub fn adopted_agent_runtime_matches_process(
+    metadata: &AgentMetadata,
+    runtime: &AgentRuntimeSnapshot,
+) -> bool {
+    let configured_harness = infer_harness(&metadata.launch_cmd, None);
+    if matches!(configured_harness, AgentHarness::Unknown) {
+        return true;
+    }
+
+    if runtime.foreground_process_name.is_none() {
+        return true;
+    }
+
+    let process_harness = infer_harness("", runtime.foreground_process_name.as_deref());
+    harness_process_is_compatible(
+        &configured_harness,
+        &process_harness,
+        runtime.foreground_process_name.as_deref(),
+    )
+}
+
 pub fn derive_runtime_status(runtime: &AgentRuntimeSnapshot) -> AgentStatus {
     if !runtime.alive {
         return AgentStatus::Exited;
