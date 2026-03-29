@@ -5,14 +5,8 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 0
 fi
 
-if ! cargo +nightly fmt --all >/dev/null 2>&1; then
-  echo "pre-commit: failed to run 'cargo +nightly fmt --all'" >&2
-  echo "Install nightly rustfmt, then run: cargo +nightly fmt --all" >&2
-  exit 1
-fi
-
-if ! git diff --quiet --exit-code -- . ':(exclude).githooks/pre-commit'; then
-  git add -u
-  echo "pre-commit: rustfmt updated files and staged the result; re-run git commit" >&2
+if ! cargo +nightly fmt --all --check >/dev/null 2>&1; then
+  echo "pre-commit: formatting check failed" >&2
+  echo "Run: cargo +nightly fmt --all" >&2
   exit 1
 fi
