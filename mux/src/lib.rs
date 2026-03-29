@@ -1141,8 +1141,12 @@ impl Mux {
         let Some(state) = self.detect_agent_state_for_pane(pane_id) else {
             return;
         };
+        let _ = self.auto_adopt_state(state);
+    }
+
+    fn auto_adopt_state(&self, state: DetectedAgentState) -> Option<Arc<AgentMetadata>> {
         if state.runtime.session_path.is_none() {
-            return;
+            return None;
         }
 
         let taken_names = self
@@ -1166,16 +1170,18 @@ impl Mux {
             managed_checkout: false,
         };
         if self
-            .install_agent_metadata_runtime(pane_id, metadata, state.runtime)
+            .install_agent_metadata_runtime(state.pane_id, metadata, state.runtime)
             .is_ok()
         {
             self.refresh_agent_runtime_for_pane_with_update(
-                pane_id,
+                state.pane_id,
                 false,
                 AgentRefreshPolicy::Throttled,
                 |_| {},
             );
+            return self.get_agent_metadata_for_pane(state.pane_id);
         }
+        None
     }
 
     fn should_refresh_harness_runtime(
@@ -1923,6 +1929,17 @@ impl Mux {
             let Some(state) = self.detect_agent_state_for_pane(pane_id) else {
                 continue;
             };
+            if Self::agent_auto_adopt_on_confirmed_session_match()
+                && state.runtime.session_path.is_some()
+            {
+                if let Some(metadata) = self.auto_adopt_state(state) {
+                    if let Some(snapshot) = self.build_agent_snapshot(pane_id, metadata) {
+                        taken_names.insert(snapshot.metadata.name.clone());
+                        agents.push(snapshot);
+                    }
+                }
+                continue;
+            }
             let base_name =
                 Self::detected_agent_name_base(&state.runtime.harness, &state.declared_cwd);
             let name = Self::next_available_agent_name(&taken_names, &base_name);
