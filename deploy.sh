@@ -67,6 +67,30 @@ while [ "$#" -gt 0 ]; do
 done
 
 SESSION_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/wakterm/session.json"
+CURRENT_HEAD="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
+
+binary_matches_head() {
+    local bin="$1"
+    local path="$2"
+    [ -x "$path" ] && "$path" --version 2>/dev/null | grep -q "$CURRENT_HEAD"
+}
+
+should_skip_build() {
+    if $CLEAN_BUILD; then
+        return 1
+    fi
+
+    for bin in wakterm wakterm-gui wakterm-mux-server; do
+        if ! binary_matches_head "$bin" "$SRC/$bin"; then
+            return 1
+        fi
+        if ! binary_matches_head "$bin" "$DEST/$bin"; then
+            return 1
+        fi
+    done
+
+    return 0
+}
 
 if $WIPE_SESSION && ! $RESTART; then
     echo "--wipe-session requires --restart"
@@ -116,7 +140,11 @@ if $CLEAN_BUILD; then
     echo "  Cleaning mux/client/server artifacts first"
     cargo clean -p mux -p codec -p wakterm -p wakterm-gui -p wakterm-mux-server
 fi
-CCACHE_DISABLE=1 cargo build --release -p wakterm -p wakterm-gui -p wakterm-mux-server 2>&1 | tail -3
+if should_skip_build; then
+    echo "  Skipping build; release and deployed binaries already match HEAD ($CURRENT_HEAD)"
+else
+    CCACHE_DISABLE=1 cargo build --release -p wakterm -p wakterm-gui -p wakterm-mux-server 2>&1 | tail -3
+fi
 echo ""
 
 if $SAVE_SESSION; then
@@ -132,11 +160,15 @@ fi
 
 echo "=== Step 3: Deploy binaries ==="
 mkdir -p "$DEST"
-for bin in wakterm wakterm-gui wakterm-mux-server; do
-    rm -f "$DEST/$bin"
-    cp "$SRC/$bin" "$DEST/$bin"
-    echo "  $bin → $DEST/$bin"
-done
+if should_skip_build; then
+    echo "  Skipping copy; deployed binaries already match HEAD ($CURRENT_HEAD)"
+else
+    for bin in wakterm wakterm-gui wakterm-mux-server; do
+        rm -f "$DEST/$bin"
+        cp "$SRC/$bin" "$DEST/$bin"
+        echo "  $bin → $DEST/$bin"
+    done
+fi
 echo "  Version: $($DEST/wakterm --version 2>&1)"
 echo ""
 
