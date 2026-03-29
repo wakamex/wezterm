@@ -890,8 +890,12 @@ impl Mux {
         let normalized = if declared_cwd.starts_with("file://") {
             Url::parse(declared_cwd)
                 .ok()
-                .and_then(|url| url.to_file_path().ok())
-                .map(|path| path.to_string_lossy().to_string())
+                .map(|url| {
+                    url.to_file_path()
+                        .ok()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .unwrap_or_else(|| url.path().to_string())
+                })
                 .unwrap_or_else(|| declared_cwd.to_string())
         } else {
             declared_cwd.to_string()
@@ -945,7 +949,8 @@ impl Mux {
                 return url
                     .to_file_path()
                     .ok()
-                    .map(|path| path.to_string_lossy().to_string());
+                    .map(|path| path.to_string_lossy().to_string())
+                    .or_else(|| Some(url.path().to_string()));
             }
             return Some(url.to_string());
         }
@@ -3607,6 +3612,44 @@ mod test {
                 }),
             })
         }
+
+        fn new_detected_with_url(
+            id: PaneId,
+            size: TerminalSize,
+            domain_id: DomainId,
+            title: &str,
+            cwd_url: &str,
+            foreground_process_name: &str,
+            argv: &[&str],
+        ) -> Arc<dyn Pane> {
+            let cwd_path = Url::parse(cwd_url)
+                .ok()
+                .map(|url| url.path().to_string())
+                .unwrap_or_default();
+            Arc::new(Self {
+                id,
+                size: Mutex::new(size),
+                domain_id,
+                title: title.to_string(),
+                cwd: Some(Url::parse(cwd_url).unwrap()),
+                foreground_process_name: Some(foreground_process_name.to_string()),
+                foreground_process_info: Some(LocalProcessInfo {
+                    pid: 1,
+                    ppid: 0,
+                    name: PathBuf::from(foreground_process_name)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(foreground_process_name)
+                        .to_string(),
+                    executable: PathBuf::from(foreground_process_name),
+                    argv: argv.iter().map(|arg| (*arg).to_string()).collect(),
+                    cwd: PathBuf::from(cwd_path),
+                    status: LocalProcessStatus::Run,
+                    start_time: 1,
+                    children: HashMap::new(),
+                }),
+            })
+        }
     }
 
     impl Pane for FakePane {
@@ -4117,6 +4160,55 @@ mod test {
             .unwrap();
 
         assert_eq!(*title_changes.lock(), 1);
+    }
+
+    #[test]
+    fn detects_opencode_from_title_with_hosted_file_cwd() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let mut config = config::Config::default();
+        config.agent_auto_adopt_on_confirmed_session_match = true;
+        config::use_this_configuration(config);
+
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new_detected_with_url(
+            40,
+            size,
+            domain.id,
+            "OC | Casual Greeting",
+            "file://fedora/home/mihai",
+            "opencode",
+            &["opencode"],
+        );
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let agents = mux.list_agents();
+        assert_eq!(agents.len(), 1);
+        assert!(matches!(agents[0].origin, AgentOrigin::Detected));
+        assert_eq!(agents[0].pane_id, pane_id);
+        assert_eq!(
+            agents[0].runtime.harness,
+            crate::agent::AgentHarness::Opencode
+        );
+        assert_eq!(agents[0].metadata.declared_cwd, "/home/mihai");
+        assert_eq!(agents[0].detection_source.as_deref(), Some("proc+title"));
     }
 
     #[test]
