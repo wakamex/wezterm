@@ -202,7 +202,7 @@ pub fn infer_harness(launch_cmd: &str, foreground_process_name: Option<&str>) ->
         if candidate.contains("gemini") {
             return AgentHarness::Gemini;
         }
-        if candidate.contains("opencode") {
+        if candidate.contains("opencode") || candidate.starts_with("oc |") {
             return AgentHarness::Opencode;
         }
     }
@@ -1927,6 +1927,10 @@ mod test {
         assert_eq!(infer_harness("gemini --yolo", None), AgentHarness::Gemini);
         assert_eq!(
             infer_harness("opencode serve", None),
+            AgentHarness::Opencode
+        );
+        assert_eq!(
+            infer_harness("OC | Casual greeting", None),
             AgentHarness::Opencode
         );
         assert_eq!(
