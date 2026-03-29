@@ -1149,6 +1149,9 @@ impl Mux {
             return None;
         }
 
+        let tab_id = self
+            .resolve_pane_id(state.pane_id)
+            .map(|(_, _, tab_id)| tab_id);
         let taken_names = self
             .agent_panes_by_name
             .read()
@@ -1179,6 +1182,9 @@ impl Mux {
                 AgentRefreshPolicy::Throttled,
                 |_| {},
             );
+            if let Some(tab_id) = tab_id {
+                self.notify_tab_title_changed(tab_id);
+            }
             return self.get_agent_metadata_for_pane(state.pane_id);
         }
         None
@@ -5156,6 +5162,86 @@ mod test {
             Some("/tmp/codex-session.jsonl")
         );
         assert!(mux.get_agent_metadata_for_pane(pane_id).is_some());
+    }
+
+    #[test]
+    fn auto_adopt_notifies_tab_title_changed() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let mut config = config::Config::default();
+        config.agent_auto_adopt_on_confirmed_session_match = true;
+        config::use_this_configuration(config);
+
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new_detected(
+            149,
+            size,
+            domain.id,
+            "codex",
+            "/tmp/auto-adopt-notify",
+            "/usr/bin/codex",
+            &["codex"],
+        );
+        let pane_id = pane.pane_id();
+        let tab_id = tab.tab_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let title_changes = std::sync::Arc::new(Mutex::new(0usize));
+        let title_changes_for_sub = std::sync::Arc::clone(&title_changes);
+        mux.subscribe(move |notification| {
+            if matches!(notification, MuxNotification::TabTitleChanged { tab_id: changed, .. } if changed == tab_id) {
+                *title_changes_for_sub.lock() += 1;
+            }
+            true
+        });
+
+        mux.agent_runtime_by_pane.write().insert(
+            pane_id,
+            AgentRuntimeSnapshot {
+                harness: crate::agent::AgentHarness::Codex,
+                transport: crate::agent::AgentTransport::ObservedPty,
+                status: crate::agent::AgentStatus::Starting,
+                turn_state: crate::agent::AgentTurnState::WaitingOnUser,
+                alive: true,
+                foreground_process_name: Some("/usr/bin/codex".to_string()),
+                tty_name: Some("/dev/pts/1".to_string()),
+                last_input_at: None,
+                last_output_at: None,
+                last_progress_at: None,
+                last_turn_completed_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 18, 39, 0).unwrap()),
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 29, 18, 39, 8).unwrap(),
+                session_path: Some("/tmp/codex-session.jsonl".to_string()),
+                progress_summary: Some("done".to_string()),
+                harness_mode: Some("default".to_string()),
+                turn_phase: Some("final_answer".to_string()),
+                attention_reason: None,
+                terminal_progress: wakterm_term::Progress::None,
+                observer_error: None,
+                observer_started_at: None,
+                last_harness_refresh_at: None,
+            },
+        );
+
+        mux.list_agents();
+
+        assert!(mux.get_agent_metadata_for_pane(pane_id).is_some());
+        assert_eq!(*title_changes.lock(), 1);
     }
 
     #[test]
