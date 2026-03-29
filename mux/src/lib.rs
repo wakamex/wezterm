@@ -161,6 +161,9 @@ enum InitialAgentRefresh {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AgentTitleFingerprint {
+    harness: crate::agent::AgentHarness,
+    transport: crate::agent::AgentTransport,
+    has_session_path: bool,
     turn_state: crate::agent::AgentTurnState,
     last_turn_completed_at: Option<DateTime<Utc>>,
     attention_reason: Option<String>,
@@ -1358,6 +1361,9 @@ impl Mux {
 
     fn title_fingerprint(runtime: &AgentRuntimeSnapshot) -> AgentTitleFingerprint {
         AgentTitleFingerprint {
+            harness: runtime.harness.clone(),
+            transport: runtime.transport.clone(),
+            has_session_path: runtime.session_path.is_some(),
             turn_state: runtime.turn_state.clone(),
             last_turn_completed_at: runtime.last_turn_completed_at,
             attention_reason: runtime.attention_reason.clone(),
@@ -4448,6 +4454,79 @@ mod test {
         mux.notify(MuxNotification::PaneOutput(pane_id));
 
         assert_eq!(*title_changes.lock(), 0);
+    }
+
+    #[test]
+    fn observer_refresh_notifies_tab_title_changed_when_session_attach_changes_icon_state() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new(143, size, domain.id);
+        let pane_id = pane.pane_id();
+        let tab_id = tab.tab_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        mux.set_agent_metadata(pane_id, sample_agent_metadata("refresh"))
+            .unwrap();
+
+        let title_changes = std::sync::Arc::new(Mutex::new(0usize));
+        let title_changes_for_sub = std::sync::Arc::clone(&title_changes);
+        mux.subscribe(move |notification| {
+            if matches!(notification, MuxNotification::TabTitleChanged { tab_id: changed, .. } if changed == tab_id)
+            {
+                *title_changes_for_sub.lock() += 1;
+            }
+            true
+        });
+
+        *title_changes.lock() = 0;
+
+        mux.apply_agent_observer_update(AgentObserverUpdate {
+            pane_id,
+            generation: 1,
+            runtime: AgentRuntimeSnapshot {
+                harness: crate::agent::AgentHarness::Codex,
+                transport: crate::agent::AgentTransport::ObservedPty,
+                status: crate::agent::AgentStatus::Starting,
+                turn_state: crate::agent::AgentTurnState::WaitingOnUser,
+                alive: true,
+                foreground_process_name: Some("/usr/bin/codex".to_string()),
+                tty_name: Some("/dev/pts/1".to_string()),
+                last_input_at: None,
+                last_output_at: None,
+                last_progress_at: None,
+                last_turn_completed_at: None,
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 29, 15, 24, 39).unwrap(),
+                session_path: Some("/tmp/codex-session.jsonl".to_string()),
+                progress_summary: Some("done".to_string()),
+                harness_mode: Some("default".to_string()),
+                turn_phase: Some("final_answer".to_string()),
+                attention_reason: None,
+                terminal_progress: wakterm_term::Progress::None,
+                observer_error: None,
+                observer_started_at: None,
+                last_harness_refresh_at: None,
+            },
+            queue_delay: Duration::ZERO,
+            refresh_elapsed: Duration::ZERO,
+        });
+
+        assert_eq!(*title_changes.lock(), 1);
     }
 
     #[test]
