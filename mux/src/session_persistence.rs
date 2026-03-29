@@ -292,14 +292,7 @@ fn restore_node<'a>(
     Box::pin(async move {
         match node {
             PaneNode::Empty => {}
-            PaneNode::Leaf(entry) => {
-                if let Some(metadata) = entry.agent_metadata.clone() {
-                    if let Some(positioned) = tab.iter_panes().get(*leaf_index) {
-                        Mux::get()
-                            .restore_agent_metadata(positioned.pane.pane_id(), metadata)
-                            .context("restoring pane agent metadata")?;
-                    }
-                }
+            PaneNode::Leaf(_entry) => {
                 // This leaf already exists — advance the index
                 *leaf_index += 1;
             }
@@ -392,10 +385,12 @@ mod test {
     use super::*;
     use crate::agent::AgentMetadata;
     use crate::client::{ClientId, ClientViewId};
+    use crate::domain::{Domain, DomainState};
     use crate::pane::{alloc_pane_id, CachePolicy, LogicalLine, Pane};
     use crate::renderable::RenderableDimensions;
     use crate::tab::{SplitDirection, SplitRequest, SplitSize, Tab};
     use crate::Mux;
+    use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use rangeset::RangeSet;
     use std::io::Write;
@@ -417,6 +412,44 @@ mod test {
                 id,
                 size: Mutex::new(size),
             })
+        }
+    }
+
+    struct TestDomain;
+
+    #[async_trait(?Send)]
+    impl Domain for TestDomain {
+        async fn spawn_pane(
+            &self,
+            size: TerminalSize,
+            _command: Option<CommandBuilder>,
+            _command_dir: Option<String>,
+        ) -> anyhow::Result<Arc<dyn Pane>> {
+            Ok(TestPane::new(alloc_pane_id(), size))
+        }
+
+        fn detachable(&self) -> bool {
+            false
+        }
+
+        fn domain_id(&self) -> crate::domain::DomainId {
+            0
+        }
+
+        fn domain_name(&self) -> &str {
+            "test"
+        }
+
+        async fn attach(&self, _window_id: Option<crate::window::WindowId>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn detach(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn state(&self) -> DomainState {
+            DomainState::Attached
         }
     }
 
@@ -677,6 +710,43 @@ mod test {
             }
             other => panic!("expected single leaf, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn restored_session_does_not_reapply_agent_metadata_to_shell_panes() {
+        let _test_lock = crate::TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let source_mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&source_mux);
+        let _guard = crate::TestMuxGuard;
+
+        let window_id = *source_mux.new_empty_window(Some("default".to_string()), None);
+        let tab_size = size(120, 40);
+
+        let tab = Arc::new(Tab::new(&tab_size));
+        let pane = TestPane::new(alloc_pane_id(), tab_size);
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        source_mux.add_tab_and_active_pane(&tab).unwrap();
+        source_mux.add_tab_to_window(&tab, window_id).unwrap();
+        source_mux
+            .set_agent_metadata(pane_id, sample_agent_metadata("reviewer"))
+            .unwrap();
+
+        let saved_tab = build_saved_session(&source_mux).windows[0].tabs[0].clone();
+
+        let restored_mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&restored_mux);
+        let restored_window = *restored_mux.new_empty_window(Some("default".to_string()), None);
+        let domain: Arc<dyn Domain> = Arc::new(TestDomain);
+
+        smol::block_on(async {
+            restore_tab(&domain, &saved_tab, tab_size, restored_window)
+                .await
+                .expect("restore tab");
+        });
+
+        assert!(restored_mux.list_agents().is_empty());
     }
 
     #[test]
