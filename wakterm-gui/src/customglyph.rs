@@ -5950,6 +5950,15 @@ impl BlockKey {
 }
 
 impl GlyphCache {
+    fn pixmap_mut_from_image<'a>(buffer: &'a mut Image) -> Option<PixmapMut<'a>> {
+        let (width, height) = buffer.image_dimensions();
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        PixmapMut::from_bytes(buffer.pixel_data_slice_mut(), width as u32, height as u32)
+    }
+
     fn draw_polys(
         &mut self,
         metrics: &RenderMetrics,
@@ -5959,9 +5968,14 @@ impl GlyphCache {
         blend_mode: BlendMode,
     ) {
         let (width, height) = buffer.image_dimensions();
-        let mut pixmap =
-            PixmapMut::from_bytes(buffer.pixel_data_slice_mut(), width as u32, height as u32)
-                .expect("make pixmap from existing bitmap");
+        let Some(mut pixmap) = Self::pixmap_mut_from_image(buffer) else {
+            log::error!(
+                "customglyph: unable to make pixmap from existing bitmap in draw_polys {}x{}",
+                width,
+                height
+            );
+            return;
+        };
 
         for Poly {
             path,
@@ -6357,12 +6371,18 @@ impl GlyphCache {
                 let topleft_offset_y = dot_area_height / 2. - square_length / 2.;
 
                 let (width, height) = buffer.image_dimensions();
-                let mut pixmap = PixmapMut::from_bytes(
-                    buffer.pixel_data_slice_mut(),
-                    width as u32,
-                    height as u32,
-                )
-                .expect("make pixmap from existing bitmap");
+                let Some(mut pixmap) = Self::pixmap_mut_from_image(&mut buffer) else {
+                    log::error!(
+                        "customglyph: unable to make pixmap from existing bitmap in braille {}x{}",
+                        width,
+                        height
+                    );
+                    return Err(anyhow::anyhow!(
+                        "invalid braille bitmap dimensions {}x{}",
+                        width,
+                        height
+                    ));
+                };
                 let mut paint = Paint::default();
                 paint.set_color(tiny_skia::Color::WHITE);
                 paint.force_hq_pipeline = true;
@@ -6950,9 +6970,14 @@ impl GlyphCache {
 // Fill a rectangular region described by the x and y ranges
 fn fill_rect(buffer: &mut Image, x: Range<f32>, y: Range<f32>, intensity: BlockAlpha) {
     let (width, height) = buffer.image_dimensions();
-    let mut pixmap =
-        PixmapMut::from_bytes(buffer.pixel_data_slice_mut(), width as u32, height as u32)
-            .expect("make pixmap from existing bitmap");
+    let Some(mut pixmap) = GlyphCache::pixmap_mut_from_image(buffer) else {
+        log::error!(
+            "customglyph: unable to make pixmap from existing bitmap in fill_rect {}x{}",
+            width,
+            height
+        );
+        return;
+    };
 
     let path = PathBuilder::from_rect(
         tiny_skia::Rect::from_xywh(x.start, y.start, x.end - x.start, y.end - y.start)
