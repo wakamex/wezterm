@@ -160,6 +160,56 @@ atlas, similar in spirit to the custom cursor/block glyph path.
 - requires hand-authoring/maintaining the vector shapes
 - monochrome/tintable paths are easier than full-color logos
 
+### Icon Authoring Workflow
+
+The implementation is runtime-hardcoded, but the authoring process is:
+
+1. start from an official asset when possible
+2. if needed, trace or flatten it into a monochrome polygon-like SVG
+3. simplify candidate outlines and render a review sheet
+4. choose the lowest-complexity version that still reads at tiny tab size
+5. hand-convert the chosen shape into `PolyCommand` data in
+   `wakterm-gui/src/customglyph.rs`
+6. build and inspect the real fancy tab bar before shipping
+
+The saved helper for step 3 is:
+
+- [`scripts/icon_simplify_review.py`](/code/wakterm/scripts/icon_simplify_review.py)
+
+It is intentionally narrow:
+
+- input must already be polygon-like SVG path data
+- outline simplification uses Ramer-Douglas-Peucker
+- supported path commands are `M`, `L`, `H`, `V`, `Z`
+- no cubic curves, transforms, gradients, or generic SVG support
+
+That matches the problem we actually solved. Trace output is a bootstrap tool,
+not the final asset.
+
+Simplification is optional. If the original or traced source already reads best
+at tab size, ship that instead of forcing a lower-complexity version.
+
+Example usage:
+
+```bash
+python scripts/icon_simplify_review.py \
+  --svg /tmp/icon-source-stripped.svg \
+  --out-dir /tmp/icon-simplify \
+  --sheet /tmp/icon-simplify-review.png \
+  --compare "Bootstrap candidate|Traced or flattened source|/tmp/icon-bootstrap.png" \
+  --candidate 3.0:"Simplified A" \
+  --candidate 4.0:"Simplified B"
+```
+
+This generates one review PNG containing the official/source card and the
+simplified candidates for side-by-side comparison.
+
+Dependencies:
+
+- Python 3
+- Pillow
+- ImageMagick `magick`
+
 ### Option B: Packaged Image Assets
 
 Use packaged image assets, not runtime generic SVG parsing.
