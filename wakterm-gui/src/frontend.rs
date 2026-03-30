@@ -533,6 +533,7 @@ pub fn shutdown() {
 pub fn try_new() -> Result<Rc<GuiFrontEnd>, Error> {
     let front_end = GuiFrontEnd::try_new()?;
     FRONT_END.with(|f| *f.borrow_mut() = Some(Rc::clone(&front_end)));
+    front_end.reconcile_workspace();
 
     let config_subscription = config::subscribe_to_config_reload({
         move || {

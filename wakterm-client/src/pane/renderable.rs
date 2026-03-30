@@ -56,7 +56,7 @@ impl LineEntry {
 pub struct RenderableInner {
     pub client: Arc<ClientInner>,
     remote_pane_id: PaneId,
-    local_pane_id: PaneId,
+    pub(crate) local_pane_id: PaneId,
     last_poll: Instant,
     pub dead: bool,
     poll_in_progress: AtomicBool,
@@ -367,11 +367,12 @@ impl RenderableInner {
             dirty.remove(stable_row);
         }
 
-        log::trace!(
-            "apply_changes_to_surface: Generate PaneOutput event for local={}",
-            self.local_pane_id
-        );
-        Mux::get().notify(mux::MuxNotification::PaneOutput(self.local_pane_id));
+        // NOTE: Do NOT call Mux::notify(PaneOutput) here! This method runs
+        // while the renderable lock is held (ClientPane::renderable.lock()).
+        // Mux::notify -> record_agent_output -> detect_agent_state_for_pane
+        // -> ClientPane::get_title -> renderable.lock() = deadlock.
+        // The caller is responsible for sending the notification after
+        // releasing the lock.
 
         let mut to_fetch = RangeSet::new();
         log::trace!("dirty as of seq {} -> {:?}", delta.seqno, dirty);

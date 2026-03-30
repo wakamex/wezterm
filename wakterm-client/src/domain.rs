@@ -1342,7 +1342,8 @@ impl Domain for ClientDomain {
                         })();
                         let _ = tx.send(result);
                     });
-                    rx.recv()
+                    smol::unblock(move || rx.recv())
+                        .await
                         .map_err(|err| anyhow!("attach worker failed: {}", err))??
                 };
 

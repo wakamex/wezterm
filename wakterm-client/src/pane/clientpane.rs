@@ -145,11 +145,17 @@ impl ClientPane {
                 let client = { Arc::clone(&self.renderable.lock().inner.borrow().client) };
                 let bonus_lines = hydrate_lines(client, delta.pane_id, bonus_lines).await;
 
-                self.renderable
-                    .lock()
-                    .inner
-                    .borrow_mut()
-                    .apply_changes_to_surface(delta, bonus_lines);
+                let local_pane_id = {
+                    let renderable = self.renderable.lock();
+                    let mut inner = renderable.inner.borrow_mut();
+                    let id = inner.local_pane_id;
+                    inner.apply_changes_to_surface(delta, bonus_lines);
+                    id
+                };
+                // Send PaneOutput notification AFTER releasing the renderable
+                // lock to avoid deadlock: Mux::notify -> record_agent_output
+                // -> detect_agent_state_for_pane -> get_title -> renderable.lock()
+                Mux::get().notify(mux::MuxNotification::PaneOutput(local_pane_id));
             }
             Pdu::SetClipboard(SetClipboard {
                 clipboard,

@@ -16,10 +16,10 @@ use crate::{
 use anyhow::{anyhow, bail, ensure};
 use async_trait::async_trait;
 use cocoa::appkit::{
-    self, CGFloat, NSApplication, NSApplicationActivateIgnoringOtherApps,
-    NSApplicationPresentationOptions, NSBackingStoreBuffered, NSEvent, NSEventModifierFlags,
-    NSOpenGLContext, NSOpenGLPixelFormat, NSPasteboard, NSRunningApplication, NSScreen, NSView,
-    NSViewHeightSizable, NSViewWidthSizable, NSWindow, NSWindowStyleMask,
+    self, CGFloat, NSApp, NSApplication, NSApplicationPresentationOptions,
+    NSBackingStoreBuffered, NSEvent, NSEventModifierFlags, NSOpenGLContext, NSOpenGLPixelFormat,
+    NSPasteboard, NSRequestUserAttentionType::NSInformationalRequest, NSRunningApplication, NSScreen,
+    NSView, NSViewHeightSizable, NSViewWidthSizable, NSWindow, NSWindowStyleMask,
 };
 use cocoa::base::*;
 use cocoa::foundation::{
@@ -160,6 +160,7 @@ impl GlContextPair {
     /// The ANGLE EGL implementation wants a CALayer descendant passed
     /// as the EGLNativeWindowType.
     pub fn create(view: id) -> anyhow::Result<Self> {
+        log::trace!("GlContextPair::create start");
         let behavior = if cfg!(debug_assertions) {
             glium::debug::DebugCallbackBehavior::DebugMessageOnError
         } else {
@@ -168,6 +169,7 @@ impl GlContextPair {
 
         // Let's first try to initialize EGL...
         let (context, backend) = match if config::configuration().prefer_egl {
+            log::trace!("GlContextPair::create attempting EGL path");
             // ANGLE wants a layer, so tell the view to create one.
             // Importantly, we must set its scale to 1.0 prior to initializing
             // EGL to prevent undesirable scaling.
@@ -188,6 +190,7 @@ impl GlContextPair {
                     layer as *const c_void,
                 ),
             };
+            log::trace!("GlContextPair::create EGL state ready ok={}", state.is_ok());
 
             if state.is_ok() {
                 conn.gl_connection
@@ -213,6 +216,7 @@ impl GlContextPair {
             Err(anyhow!("prefers not to use EGL"))
         } {
             Ok(backend) => {
+                log::trace!("GlContextPair::create using EGL backend");
                 let backend = Rc::new(backend);
                 let context =
                     unsafe { glium::backend::Context::new(Rc::clone(&backend), true, behavior) }?;
@@ -221,13 +225,17 @@ impl GlContextPair {
             // ... and then fallback to the deprecated platform provided CGL
             Err(err) => {
                 log::debug!("EGL init failed: {:#}, falling back to CGL", err);
+                log::trace!("GlContextPair::create falling back to CGL");
                 let backend = Rc::new(cglbits::GlState::create(view)?);
+                log::trace!("GlContextPair::create CGL state created");
                 let context =
                     unsafe { glium::backend::Context::new(Rc::clone(&backend), true, behavior) }?;
+                log::trace!("GlContextPair::create CGL glium context created");
                 (context, BackendImpl::Cgl(backend))
             }
         };
 
+        log::trace!("GlContextPair::create complete");
         Ok(Self { context, backend })
     }
 }
@@ -242,6 +250,7 @@ mod cglbits {
 
     impl GlState {
         pub fn create(view: id) -> anyhow::Result<Self> {
+            log::trace!("cglbits::GlState::create start");
             log::trace!("Calling NSOpenGLPixelFormat::initWithAttributes");
             let pixel_format = unsafe {
                 StrongPtr::new(NSOpenGLPixelFormat::alloc(nil).initWithAttributes_(&[
@@ -280,6 +289,7 @@ mod cglbits {
                 )
             };
             ensure!(!gl_context.is_null(), "failed to create NSOpenGLContext");
+            log::trace!("cglbits::GlState::create NSOpenGLContext created");
 
             unsafe {
                 let opaque: cgl::GLint = 0;
@@ -519,6 +529,10 @@ impl Window {
                 config.integrated_title_button_style,
             );
 
+            let behavior = window.collectionBehavior()
+                | appkit::NSWindowCollectionBehavior::NSWindowCollectionBehaviorMoveToActiveSpace;
+            window.setCollectionBehavior_(behavior);
+
             // Prevent Cocoa native tabs from being used
             let _: () = msg_send![*window, setTabbingMode:2 /* NSWindowTabbingModeDisallowed */];
             let _: () = msg_send![*window, setRestorable: NO];
@@ -552,7 +566,6 @@ impl Window {
                 static LAST_POSITION: RefCell<Option<NSPoint>> = RefCell::new(None);
             }
 
-            let frame = NSWindow::frame(*window);
             let active_screen = NSScreen::mainScreen(nil);
             let active_screen_frame = NSScreen::frame(active_screen);
 
@@ -584,7 +597,8 @@ impl Window {
                         // Otherwise, position as if it is the first time
                         // we're displaying on this screen
                         window.center();
-                        window.cascadeTopLeftFromPoint_(frame.origin)
+                        let centered = NSWindow::frame(*window);
+                        window.cascadeTopLeftFromPoint_(centered.origin)
                     }
                 };
                 last_pos.borrow_mut().replace(next_pos);
@@ -714,15 +728,25 @@ pub fn window_level_to_nswindow_level(level: WindowLevel) -> NSWindowLevel {
 impl WindowOps for Window {
     async fn enable_opengl(&self) -> anyhow::Result<Rc<glium::backend::Context>> {
         let window_id = self.id;
-        promise::spawn::spawn(async move {
-            if let Some(handle) = Connection::get().unwrap().window_by_id(window_id) {
-                let mut inner = handle.borrow_mut();
-                inner.enable_opengl()
-            } else {
-                bail!("invalid window");
-            }
-        })
-        .await
+        log::trace!("Window::enable_opengl start window_id={window_id}");
+        let result = if let Some(handle) = Connection::get().unwrap().window_by_id(window_id) {
+            log::trace!("Window::enable_opengl got handle window_id={window_id}");
+            let mut inner = handle.borrow_mut();
+            log::trace!("Window::enable_opengl borrowed inner window_id={window_id}");
+            let result = inner.enable_opengl();
+            log::trace!(
+                "Window::enable_opengl inner.enable_opengl returned ok={} window_id={window_id}",
+                result.is_ok()
+            );
+            result
+        } else {
+            bail!("invalid window");
+        };
+        log::trace!(
+            "Window::enable_opengl await returned ok={} window_id={window_id}",
+            result.is_ok()
+        );
+        result
     }
 
     fn notify<T: Any + Send + Sync>(&self, t: T)
@@ -1169,11 +1193,52 @@ impl WindowInner {
 }
 
 impl WindowInner {
-    fn show(&mut self) {
+    fn log_show_state_for(window: id, label: &str) {
         unsafe {
-            let current_app = NSRunningApplication::currentApplication(nil);
-            current_app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps);
+            let visible = NSWindow::isVisible(window);
+            let miniaturized: BOOL = msg_send![window, isMiniaturized];
+            let key = NSWindow::isKeyWindow(window);
+            let main: BOOL = msg_send![window, isMainWindow];
+            let frame = NSWindow::frame(window);
+            let occlusion = NSWindow::occlusionState(window);
+            let screen = NSWindow::screen(window);
+            let screen_visible = if screen != nil {
+                Some(NSScreen::visibleFrame(screen))
+            } else {
+                None
+            };
+            let alpha = NSWindow::alphaValue(window);
+            let level = NSWindow::level(window);
+            let can_hide = NSWindow::canHide(window);
+            let hides_on_deactivate = NSWindow::hidesOnDeactivate(window);
+            log::debug!(
+                "{label} visible={} key={} main={} miniaturized={} occluded_visible={} alpha={} level={} can_hide={} hides_on_deactivate={} frame=({}, {}) {}x{} screen_visible={:?}",
+                visible != NO,
+                key != NO,
+                main != NO,
+                miniaturized != NO,
+                occlusion.contains(appkit::NSWindowOcclusionState::NSWindowOcclusionStateVisible),
+                alpha,
+                level,
+                can_hide != NO,
+                hides_on_deactivate != NO,
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+                screen_visible.map(|rect| (
+                    rect.origin.x,
+                    rect.origin.y,
+                    rect.size.width,
+                    rect.size.height
+                ))
+            );
+        }
+    }
 
+    fn show(&mut self) {
+        log::debug!("WindowInner::show start");
+        unsafe {
             // Stupid hack: adjust the window style mask and set it back
             // to what it was.
             // Without this, the CAMetalLayer used by webgpu seems to get
@@ -1187,13 +1252,70 @@ impl WindowInner {
                 self.config.integrated_title_button_style,
             );
 
+            if std::env::var_os("WAKTERM_MAC_FORCE_OPAQUE_WINDOW").is_some() {
+                self.window.setOpaque_(YES);
+                self.window.setBackgroundColor_(
+                    appkit::NSColor::colorWithSRGBRed_green_blue_alpha_(nil, 1.0, 0.0, 0.0, 1.0),
+                );
+            }
+
             self.update_titlebar_background();
 
-            self.window.makeKeyAndOrderFront_(nil)
+            self.window.center();
+            self.window.setCanHide_(NO);
+            self.window.setHidesOnDeactivate_(NO);
+            self.window.setAlphaValue_(1.0);
+
+            // Do the initial show synchronously so the window is at least
+            // registered with the window server.
+            self.window.makeKeyAndOrderFront_(nil);
+            Self::log_show_state_for(*self.window, "WindowInner::show state");
         }
+
+        // Schedule the activation and ordering on the main GCD queue so they
+        // run in the NEXT run loop iteration, after the spawn queue drain
+        // callback returns and AppKit has processed the initial show events.
+        // Previous attempts (NSTimer, performSelector:afterDelay:, background
+        // thread -> spawn_into_main_thread) all failed because the spawn queue
+        // pump starves the run loop during the connect/attach flow.
+        let window = *self.window as usize;
+        let when = dispatch2::DispatchTime::NOW.time(100_000_000); // 100ms in nanoseconds
+        extern "C" fn reshow_trampoline(ctx: *mut std::ffi::c_void) {
+            let window = ctx as id;
+            log::debug!("WindowInner::show dispatch_after fired");
+            unsafe {
+                let current_app = NSRunningApplication::currentApplication(nil);
+                let (): () = msg_send![current_app, activateWithOptions: 3u64];
+                let app = NSApp();
+                let (): () = msg_send![app, unhide: nil];
+                let (): () = msg_send![app, activateIgnoringOtherApps: YES];
+                app.requestUserAttention_(NSInformationalRequest);
+                let (): () = msg_send![window, deminiaturize: nil];
+                let (): () = msg_send![window, orderFrontRegardless];
+                let (): () = msg_send![window, orderFront: nil];
+                NSWindow::makeMainWindow(window);
+                NSWindow::makeKeyWindow(window);
+                NSWindow::makeKeyAndOrderFront_(window, nil);
+                WindowInner::log_show_state_for(
+                    window,
+                    "WindowInner::show delayed state",
+                );
+            }
+        }
+        unsafe {
+            dispatch2::DispatchQueue::exec_after_f(
+                when,
+                &dispatch2::DispatchQueue::main(),
+                window as *mut std::ffi::c_void,
+                reshow_trampoline,
+            );
+        }
+
+        log::debug!("WindowInner::show complete");
     }
 
     fn close(&mut self) {
+        log::debug!("WindowInner::close");
         unsafe {
             self.window.close();
         }
@@ -1206,6 +1328,7 @@ impl WindowInner {
     }
 
     fn hide(&mut self) {
+        log::debug!("WindowInner::hide");
         unsafe {
             NSWindow::miniaturize_(*self.window, *self.window);
             // We could literally set it invisible like this, but
@@ -1239,6 +1362,8 @@ impl WindowInner {
     fn invalidate(&mut self) {
         unsafe {
             let () = msg_send![*self.view, setNeedsDisplay: YES];
+            let (): () = msg_send![*self.view, displayIfNeeded];
+            let (): () = msg_send![*self.window, displayIfNeeded];
             if let Some(window_view) = WindowView::get_this(&**self.view) {
                 window_view.inner.borrow_mut().invalidated = true;
             }
@@ -1733,10 +1858,14 @@ impl Keyboard {
 
 impl Inner {
     fn enable_opengl(&mut self) -> anyhow::Result<Rc<glium::backend::Context>> {
+        log::trace!("Inner::enable_opengl start");
         let view = self.view_id.as_ref().unwrap().load();
+        log::trace!("Inner::enable_opengl loaded view");
         let glium_context = GlContextPair::create(*view)?;
+        log::trace!("Inner::enable_opengl GlContextPair::create returned");
 
         self.gl_context_pair.replace(glium_context.clone());
+        log::trace!("Inner::enable_opengl stored context");
 
         Ok(glium_context.context)
     }
@@ -1908,6 +2037,30 @@ fn get_window_class() -> &'static Class {
             YES
         }
 
+        extern "C" fn wakterm_reshow(this: &mut Object, _: Sel, _: id) {
+            unsafe {
+                let window = this as *mut Object;
+                let current_app = NSRunningApplication::currentApplication(nil);
+                let (): () = msg_send![current_app, activateWithOptions: 3u64];
+                let app = NSApp();
+                let (): () = msg_send![app, unhide: nil];
+                NSApplication::activateIgnoringOtherApps_(app, YES);
+                app.requestUserAttention_(NSInformationalRequest);
+                let (): () = msg_send![window, deminiaturize: nil];
+                NSWindow::orderFrontWindow_relativeTo_(
+                    window,
+                    appkit::NSWindowOrderingMode::NSWindowAbove,
+                    0,
+                );
+                let (): () = msg_send![window, orderFrontRegardless];
+                let (): () = msg_send![window, orderFront: nil];
+                NSWindow::makeMainWindow(window);
+                NSWindow::makeKeyWindow(window);
+                NSWindow::makeKeyAndOrderFront_(window, nil);
+                WindowInner::log_show_state_for(window, "WindowInner::show delayed state");
+            }
+        }
+
         unsafe {
             cls.add_method(
                 sel!(canBecomeKeyWindow),
@@ -1916,6 +2069,10 @@ fn get_window_class() -> &'static Class {
             cls.add_method(
                 sel!(canBecomeMainWindow),
                 yes as extern "C" fn(&mut Object, Sel) -> BOOL,
+            );
+            cls.add_method(
+                sel!(waktermReShow:),
+                wakterm_reshow as extern "C" fn(&mut Object, Sel, id),
             );
         }
 
