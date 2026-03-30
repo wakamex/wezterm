@@ -143,6 +143,7 @@ const AGENT_DETECTED_FULL_SCAN_THROTTLE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentTabBadgeMode {
+    Identity,
     Attention,
     Turn,
     Off,
@@ -1645,7 +1646,8 @@ impl Mux {
             "off" => AgentTabBadgeMode::Off,
             "turn" => AgentTabBadgeMode::Turn,
             "attention" => AgentTabBadgeMode::Attention,
-            _ => AgentTabBadgeMode::Attention,
+            "identity" => AgentTabBadgeMode::Identity,
+            _ => AgentTabBadgeMode::Identity,
         }
     }
 
@@ -1746,20 +1748,124 @@ impl Mux {
 
     fn should_badge_tab_for_agents(&self, tab_id: TabId, view_id: Option<&ClientViewId>) -> bool {
         let badge_mode = Self::agent_tab_badge_mode();
-        if matches!(badge_mode, AgentTabBadgeMode::Off) {
-            return false;
-        }
-        let badge = self.cached_tab_badge_state_for_agents(tab_id, view_id);
         match badge_mode {
             AgentTabBadgeMode::Off => false,
-            AgentTabBadgeMode::Turn => badge.waiting_on_user,
-            AgentTabBadgeMode::Attention => badge.needs_attention,
+            AgentTabBadgeMode::Identity => self.tab_has_any_agent(tab_id),
+            AgentTabBadgeMode::Turn => {
+                self.cached_tab_badge_state_for_agents(tab_id, view_id)
+                    .waiting_on_user
+            }
+            AgentTabBadgeMode::Attention => {
+                self.cached_tab_badge_state_for_agents(tab_id, view_id)
+                    .needs_attention
+            }
         }
+    }
+
+    fn tab_has_any_agent(&self, tab_id: TabId) -> bool {
+        let Some(tab) = self.get_tab(tab_id) else {
+            return false;
+        };
+        for pos in tab.iter_panes_ignoring_zoom() {
+            let pane_id = pos.pane.pane_id();
+            if self.get_agent_metadata_for_pane(pane_id).is_some()
+                || self.detected_agent_panes.read().contains(&pane_id)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn tab_has_known_harness(&self, tab_id: TabId) -> bool {
+        let Some(tab) = self.get_tab(tab_id) else {
+            return false;
+        };
+        for pos in tab.iter_panes_ignoring_zoom() {
+            if let Some(harness) = self.cached_agent_harness_for_pane(pos.pane.pane_id()) {
+                if !matches!(harness, crate::agent::AgentHarness::Unknown) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns the list of agent harness icons that should be visible for a tab,
+    /// filtered by the current `agent_tab_badge_mode`. Deduplicates by harness type.
+    pub fn visible_harness_icons_for_tab(
+        &self,
+        tab_id: TabId,
+        view_id: Option<&ClientViewId>,
+    ) -> Vec<crate::agent::AgentHarness> {
+        use crate::agent::AgentHarness;
+
+        let badge_mode = Self::agent_tab_badge_mode();
+        if matches!(badge_mode, AgentTabBadgeMode::Off) {
+            return vec![];
+        }
+
+        let Some(tab) = self.get_tab(tab_id) else {
+            return vec![];
+        };
+
+        let runtime_by_pane = self.agent_runtime_by_pane.read();
+        let detected_agent_panes = self.detected_agent_panes.read();
+        let mut seen = std::collections::HashSet::new();
+        let mut icons = Vec::new();
+
+        for pos in tab.iter_panes_ignoring_zoom() {
+            let pane_id = pos.pane.pane_id();
+
+            let Some(harness) = self.cached_agent_harness_for_pane(pane_id) else {
+                continue;
+            };
+            if matches!(harness, AgentHarness::Unknown) {
+                continue;
+            }
+
+            let is_agent = self.get_agent_metadata_for_pane(pane_id).is_some()
+                || detected_agent_panes.contains(&pane_id);
+            if !is_agent {
+                continue;
+            }
+
+            let visible = match badge_mode {
+                AgentTabBadgeMode::Identity => true,
+                AgentTabBadgeMode::Turn => {
+                    runtime_by_pane
+                        .get(&pane_id)
+                        .map_or(false, |rt| Self::agent_waiting_on_user(rt))
+                }
+                AgentTabBadgeMode::Attention => {
+                    runtime_by_pane.get(&pane_id).map_or(false, |rt| {
+                        match view_id {
+                            Some(vid) => self.agent_turn_needs_attention_for_view(vid, pane_id, rt),
+                            None => Self::agent_waiting_on_user(rt),
+                        }
+                    })
+                }
+                AgentTabBadgeMode::Off => false,
+            };
+
+            if visible {
+                let key = std::mem::discriminant(&harness);
+                if seen.insert(key) {
+                    icons.push(harness);
+                }
+            }
+        }
+
+        icons
     }
 
     pub fn effective_tab_title_for_view(&self, view_id: &ClientViewId, tab_id: TabId) -> String {
         let base_title = self.raw_tab_title(tab_id);
-        if self.should_badge_tab_for_agents(tab_id, Some(view_id)) {
+        // Only prepend text badge for agents with Unknown harness (no icon available).
+        // When a known harness icon is present, the icon IS the badge.
+        if self.should_badge_tab_for_agents(tab_id, Some(view_id))
+            && !self.tab_has_known_harness(tab_id)
+        {
             if let Some(badge) = Self::agent_tab_badge_text() {
                 return format!("{badge}{base_title}");
             }
@@ -1772,7 +1878,9 @@ impl Mux {
             Some(view_id) => self.effective_tab_title_for_view(view_id.as_ref(), tab_id),
             None => {
                 let base_title = self.raw_tab_title(tab_id);
-                if self.should_badge_tab_for_agents(tab_id, None) {
+                if self.should_badge_tab_for_agents(tab_id, None)
+                    && !self.tab_has_known_harness(tab_id)
+                {
                     if let Some(badge) = Self::agent_tab_badge_text() {
                         return format!("{badge}{base_title}");
                     }
@@ -5671,11 +5779,16 @@ mod test {
         }
 
         let _config = TestConfigGuard::new("turn", "🤖 ");
-        assert_eq!(mux.effective_tab_title(tab.tab_id()), "🤖 scrape");
+        // Known harness (Codex) → text badge suppressed, icon takes over
+        assert_eq!(mux.effective_tab_title(tab.tab_id()), "scrape");
+        // But the icon should be visible
+        let icons = mux.visible_harness_icons_for_tab(tab.tab_id(), None);
+        assert_eq!(icons.len(), 1);
+        assert!(matches!(icons[0], crate::agent::AgentHarness::Codex));
     }
 
     #[test]
-    fn effective_tab_title_hides_badge_when_configured_empty() {
+    fn effective_tab_title_uses_text_badge_for_unknown_harness() {
         let _test_lock = TEST_MUX_LOCK.lock();
         let _executor = promise::spawn::SimpleExecutor::new();
         config::use_test_configuration();
@@ -5694,14 +5807,16 @@ mod test {
 
         let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
         let tab = Arc::new(Tab::new(&size));
-        tab.set_title("🤖 scrape");
+        tab.set_title("scrape");
         let pane = FakePane::new(143, size, domain.id);
         let pane_id = pane.pane_id();
         tab.assign_pane(&pane);
         mux.add_tab_and_active_pane(&tab).unwrap();
         mux.add_tab_to_window(&tab, window_id).unwrap();
-        mux.set_agent_metadata(pane_id, sample_agent_metadata("scraper"))
-            .unwrap();
+        // Use an unknown harness so the text badge is the only indicator
+        let mut metadata = sample_agent_metadata("scraper");
+        metadata.launch_cmd = "unknown-tool".to_string();
+        mux.set_agent_metadata(pane_id, metadata).unwrap();
 
         {
             let mut runtime_by_pane = mux.agent_runtime_by_pane.write();
@@ -5711,7 +5826,14 @@ mod test {
                 Some(Utc.with_ymd_and_hms(2026, 3, 18, 12, 0, 0).unwrap());
         }
 
-        let _config = TestConfigGuard::new("turn", "");
+        // Unknown harness → text badge is used as fallback
+        let _config = TestConfigGuard::new("turn", "🤖 ");
+        assert_eq!(mux.effective_tab_title(tab.tab_id()), "🤖 scrape");
+        // No harness icon available
+        assert!(mux.visible_harness_icons_for_tab(tab.tab_id(), None).is_empty());
+
+        // With empty badge text → no badge at all
+        let _config2 = TestConfigGuard::new("turn", "");
         assert_eq!(mux.effective_tab_title(tab.tab_id()), "scrape");
     }
 
@@ -5769,26 +5891,37 @@ mod test {
         mux.set_active_pane_for_client_view(view_b.as_ref(), window_id, tab.tab_id(), pane_id)
             .unwrap();
 
-        assert_eq!(
-            mux.effective_tab_title_for_view(view_a.as_ref(), tab.tab_id()),
-            "🤖 scrape"
-        );
-        assert_eq!(
-            mux.effective_tab_title_for_view(view_b.as_ref(), tab.tab_id()),
-            "🤖 scrape"
-        );
-
-        mux.set_focused_pane_for_client(client_a.as_ref(), pane_id)
-            .unwrap();
-        mux.acknowledge_agent_attention_for_view(view_a.as_ref(), pane_id);
-
+        // Known harness → text badge suppressed, but icons reflect attention state
         assert_eq!(
             mux.effective_tab_title_for_view(view_a.as_ref(), tab.tab_id()),
             "scrape"
         );
         assert_eq!(
             mux.effective_tab_title_for_view(view_b.as_ref(), tab.tab_id()),
-            "🤖 scrape"
+            "scrape"
+        );
+        // Both views see the icon (attention mode, neither has acknowledged)
+        assert_eq!(
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_a.as_ref())).len(),
+            1
+        );
+        assert_eq!(
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_b.as_ref())).len(),
+            1
+        );
+
+        mux.set_focused_pane_for_client(client_a.as_ref(), pane_id)
+            .unwrap();
+        mux.acknowledge_agent_attention_for_view(view_a.as_ref(), pane_id);
+
+        // View A acknowledged → no icon for A, still shows for B
+        assert_eq!(
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_a.as_ref())).len(),
+            0
+        );
+        assert_eq!(
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_b.as_ref())).len(),
+            1
         );
     }
 
@@ -5836,17 +5969,23 @@ mod test {
         mux.set_active_pane_for_client_view(view_id.as_ref(), window_id, tab.tab_id(), pane_id)
             .unwrap();
 
+        // Known harness → text badge suppressed, icon shows attention
         assert_eq!(
             mux.effective_tab_title_for_view(view_id.as_ref(), tab.tab_id()),
-            "🤖 scrape"
+            "scrape"
+        );
+        assert_eq!(
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_id.as_ref())).len(),
+            1
         );
 
         let _identity = mux.with_identity(Some(client_id));
         mux.focus_pane_and_containing_tab(pane_id).unwrap();
 
+        // After focusing, attention is acknowledged → icon hidden
         assert_eq!(
-            mux.effective_tab_title_for_view(view_id.as_ref(), tab.tab_id()),
-            "scrape"
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_id.as_ref())).len(),
+            0
         );
     }
 

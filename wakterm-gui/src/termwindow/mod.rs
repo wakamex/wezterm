@@ -258,7 +258,7 @@ pub struct TabInformation {
     pub is_active: bool,
     pub is_last_active: bool,
     pub active_pane: Option<PaneInformation>,
-    pub harness_icon: Option<TabHarnessIcon>,
+    pub harness_icons: Vec<TabHarnessIcon>,
     pub assigned_color: Option<config::RgbaColor>,
     pub window_id: MuxWindowId,
     pub tab_title: String,
@@ -291,7 +291,14 @@ impl UserData for TabInformation {
             }
         });
         fields.add_field_method_get("harness_icon", |_, this| {
-            Ok(this.harness_icon.map(|icon| icon.as_str().to_string()))
+            Ok(this.harness_icons.first().map(|icon| icon.as_str().to_string()))
+        });
+        fields.add_field_method_get("harness_icons", |_, this| {
+            Ok(this
+                .harness_icons
+                .iter()
+                .map(|icon| icon.as_str().to_string())
+                .collect::<Vec<_>>())
         });
         fields.add_field_method_get("assigned_color", |_, this| {
             Ok(this.assigned_color.map(String::from))
@@ -3694,17 +3701,11 @@ impl TermWindow {
             .map(|(idx, tab)| {
                 let panes = self.get_pos_panes_for_tab(tab);
                 let active_pane = panes.iter().find(|p| p.is_active);
-                let harness_icon = active_pane
-                    .and_then(|pos| {
-                        mux.cached_agent_harness_for_pane(pos.pane.pane_id())
-                            .and_then(TabHarnessIcon::from_agent_harness)
-                    })
-                    .or_else(|| {
-                        panes.iter().find_map(|pos| {
-                            mux.cached_agent_harness_for_pane(pos.pane.pane_id())
-                                .and_then(TabHarnessIcon::from_agent_harness)
-                        })
-                    });
+                let harness_icons: Vec<TabHarnessIcon> = mux
+                    .visible_harness_icons_for_tab(tab.tab_id(), None)
+                    .into_iter()
+                    .filter_map(TabHarnessIcon::from_agent_harness)
+                    .collect();
 
                 TabInformation {
                     tab_index: idx,
@@ -3713,7 +3714,7 @@ impl TermWindow {
                     is_last_active: last_active_idx == Some(idx),
                     window_id: self.mux_window_id,
                     tab_title: mux.effective_tab_title(tab.tab_id()),
-                    harness_icon,
+                    harness_icons,
                     assigned_color: None,
                     active_pane: active_pane.map(Self::pos_pane_to_pane_info),
                 }
@@ -3895,7 +3896,7 @@ mod test {
             is_active: true,
             is_last_active: false,
             active_pane: active_pane_title.map(pane_with_title),
-            harness_icon: None,
+            harness_icons: vec![],
             assigned_color: None,
             window_id: 0,
             tab_title: tab_title.to_string(),

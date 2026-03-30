@@ -33,7 +33,7 @@ pub enum TabBarItem {
 pub struct TabEntry {
     pub item: TabBarItem,
     pub title: Line,
-    pub icon: Option<TabHarnessIcon>,
+    pub icons: Vec<TabHarnessIcon>,
     pub assigned_color: Option<RgbaColor>,
     pub title_bg: Option<ColorAttribute>,
     pub title_fg: Option<ColorAttribute>,
@@ -241,7 +241,7 @@ fn compute_tab_title(
                 }
 
                 if !config.use_fancy_tab_bar {
-                    if let Some(icon) = tab.harness_icon {
+                    for icon in &tab.harness_icons {
                         let graphic = format!("{} ", icon.as_glyph());
                         len += unicode_column_width(&graphic, None);
                         items.push(FormatItem::Text(graphic));
@@ -298,7 +298,7 @@ impl TabBarState {
             items: vec![TabEntry {
                 item: TabBarItem::None,
                 title: Line::from_text(" ", &CellAttributes::blank(), 1, None),
-                icon: None,
+                icons: vec![],
                 assigned_color: None,
                 title_bg: None,
                 title_fg: None,
@@ -395,7 +395,7 @@ impl TabBarState {
             items.push(TabEntry {
                 item: TabBarItem::WindowButton(*button),
                 title: title.to_owned(),
-                icon: None,
+                icons: vec![],
                 assigned_color: None,
                 title_bg: None,
                 title_fg: None,
@@ -526,7 +526,7 @@ impl TabBarState {
             items.push(TabEntry {
                 item: TabBarItem::LeftStatus,
                 title: left_status_line.clone(),
-                icon: None,
+                icons: vec![],
                 assigned_color: None,
                 title_bg: None,
                 title_fg: None,
@@ -611,7 +611,7 @@ impl TabBarState {
             items.push(TabEntry {
                 item: TabBarItem::Tab { tab_idx, active },
                 title,
-                icon: tab_info[tab_idx].harness_icon,
+                icons: tab_info[tab_idx].harness_icons.clone(),
                 assigned_color: tab_info[tab_idx].assigned_color,
                 title_bg: tab_title.title_bg,
                 title_fg: tab_title.title_fg,
@@ -637,7 +637,7 @@ impl TabBarState {
             items.push(TabEntry {
                 item: TabBarItem::NewTabButton,
                 title: new_tab_button.clone(),
-                icon: None,
+                icons: vec![],
                 assigned_color: None,
                 title_bg: None,
                 title_fg: None,
@@ -703,7 +703,7 @@ impl TabBarState {
         items.push(TabEntry {
             item: TabBarItem::RightStatus,
             title: right_status_line.clone(),
-            icon: None,
+            icons: vec![],
             assigned_color: None,
             title_bg: None,
             title_fg: None,

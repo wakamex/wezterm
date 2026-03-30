@@ -185,13 +185,17 @@ pub struct Config {
     #[dynamic(default)]
     pub tab_bar_style: TabBarStyle,
 
-    /// Controls agent tab badge behavior.
-    /// Valid values are "attention", "turn", and "off".
+    /// Controls when agent indicators (harness icons and text badges) appear in tabs.
+    /// "identity" — always show when agent detected (default)
+    /// "attention" — show only when agent needs your attention
+    /// "turn" — show when agent is waiting on user input
+    /// "off" — never show
     #[dynamic(default = "default_agent_tab_badge_mode")]
     pub agent_tab_badge_mode: String,
 
-    /// Prefix shown in tab titles when an agent badge is active.
-    /// Set to the empty string to suppress the visual badge.
+    /// Text prefix shown in tab titles for agents with no known harness icon.
+    /// When a harness-specific icon (Claude, Codex, etc.) is available, the
+    /// icon is used instead and this text badge is suppressed.
     #[dynamic(default = "default_agent_tab_badge")]
     pub agent_tab_badge: String,
 
@@ -1763,7 +1767,7 @@ fn default_harfbuzz_features() -> Vec<String> {
 }
 
 fn default_agent_tab_badge_mode() -> String {
-    "attention".into()
+    "identity".into()
 }
 
 fn default_agent_tab_badge() -> String {

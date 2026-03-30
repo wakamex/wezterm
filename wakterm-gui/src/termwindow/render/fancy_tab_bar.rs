@@ -116,13 +116,13 @@ impl crate::TermWindow {
                         .unwrap_or(InheritableColor::Inherited),
                 })
             };
-            let wrap_icon_title = |title: Element| {
+            let wrap_icon_title = |title: Element, icon_count: usize| {
                 Element::new(
                     &font,
                     ElementContent::Children(vec![
                         make_harness_icon_spacer(
                             &font,
-                            harness_icon_slot_width(tab_bar_height),
+                            multi_icon_slot_width(tab_bar_height, icon_count),
                             harness_icon_gap(&metrics),
                         ),
                         title,
@@ -209,13 +209,13 @@ impl crate::TermWindow {
                     let resolved_text = explicit_fg_color
                         .unwrap_or_else(|| active_tab.fg_color.into())
                         .to_linear();
-                    let title = make_title(item.icon.map(|_| resolved_text));
-                    let element = if item.icon.is_some() {
-                        wrap_icon_title(title)
+                    let title = make_title(if item.icons.is_empty() { None } else { Some(resolved_text) });
+                    let element = if !item.icons.is_empty() {
+                        wrap_icon_title(title, item.icons.len())
                     } else {
                         title
                     };
-                    if item.icon.is_some() && std::env::var_os("WAKTERM_TRACE_TAB_COLORS").is_some()
+                    if !item.icons.is_empty() && std::env::var_os("WAKTERM_TRACE_TAB_COLORS").is_some()
                     {
                         log::error!(
                             "fancy_tab_color_trace state=active explicit_fg={:?} wrapper_text={} wrapper_bg={}",
@@ -281,13 +281,13 @@ impl crate::TermWindow {
                     let text = explicit_fg_color
                         .unwrap_or_else(|| inactive_tab.fg_color.into())
                         .to_linear();
-                    let title = make_title(item.icon.map(|_| text));
-                    let element = if item.icon.is_some() {
-                        wrap_icon_title(title)
+                    let title = make_title(if item.icons.is_empty() { None } else { Some(text) });
+                    let element = if !item.icons.is_empty() {
+                        wrap_icon_title(title, item.icons.len())
                     } else {
                         title
                     };
-                    if item.icon.is_some() && std::env::var_os("WAKTERM_TRACE_TAB_COLORS").is_some()
+                    if !item.icons.is_empty() && std::env::var_os("WAKTERM_TRACE_TAB_COLORS").is_some()
                     {
                         log::error!(
                             "fancy_tab_color_trace state={} explicit_fg={:?} wrapper_text={} wrapper_bg={}",
@@ -520,7 +520,6 @@ impl crate::TermWindow {
             pixel_cell: metrics.cell_size.width as f32,
         };
         let tab_left_padding = Dimension::Cells(0.15).evaluate_as_pixels(width_context);
-        let icon_slot_width = harness_icon_slot_width(tab_bar_height);
         let hovered_tab_idx = match self.last_ui_item.as_ref().map(|item| &item.item_type) {
             Some(UIItemType::TabBar(TabBarItem::Tab { tab_idx, .. })) => Some(*tab_idx),
             Some(UIItemType::CloseTab(tab_idx)) => Some(*tab_idx),
@@ -538,34 +537,32 @@ impl crate::TermWindow {
             else {
                 continue;
             };
-            let Some(icon) = entry.icon else {
+            if entry.icons.is_empty() {
                 continue;
-            };
+            }
 
             let hovered = hovered_tab_idx == Some(tab_idx);
             let color = harness_icon_color(entry, &colors, palette, hovered);
-            if std::env::var_os("WAKTERM_TRACE_TAB_COLORS").is_some() {
-                log::error!(
-                    "fancy_tab_icon_trace tab_idx={} hovered={} icon_color={}",
-                    tab_idx,
-                    hovered,
-                    linear_to_rgb_hex(color),
-                );
-            }
             let item_height = item.height as f32;
-            let icon_size = (item_height - 2.0).max(0.0);
-            let icon_x =
-                item.x as f32 + tab_left_padding + (icon_slot_width - icon_size).max(0.0) / 2.0;
-            let icon_y = item.y as f32 + (item_height - icon_size) / 2.0;
-            self.poly_quad(
-                &mut layers,
-                1,
-                euclid::point2(icon_x, icon_y),
-                harness_icon_poly(icon),
-                metrics.underline_height.max(2),
-                euclid::size2(icon_size, icon_size),
-                color,
-            )?;
+            let single_icon_size = (item_height - 2.0).max(0.0);
+            let overlap_stride = single_icon_size * 0.65;
+
+            for (i, icon) in entry.icons.iter().enumerate() {
+                let icon_x = item.x as f32
+                    + tab_left_padding
+                    + (i as f32) * overlap_stride
+                    + (harness_icon_slot_width(item_height) - single_icon_size).max(0.0) / 2.0;
+                let icon_y = item.y as f32 + (item_height - single_icon_size) / 2.0;
+                self.poly_quad(
+                    &mut layers,
+                    1,
+                    euclid::point2(icon_x, icon_y),
+                    harness_icon_poly(*icon),
+                    metrics.underline_height.max(2),
+                    euclid::size2(single_icon_size, single_icon_size),
+                    color,
+                )?;
+            }
         }
 
         Ok(())
@@ -645,6 +642,17 @@ fn make_harness_icon_spacer(font: &Rc<LoadedFont>, slot_width: f32, gap: f32) ->
 
 fn harness_icon_slot_width(tab_bar_height: f32) -> f32 {
     tab_bar_height * 0.88
+}
+
+fn multi_icon_slot_width(tab_bar_height: f32, icon_count: usize) -> f32 {
+    let single = harness_icon_slot_width(tab_bar_height);
+    if icon_count <= 1 {
+        single
+    } else {
+        let icon_size = (tab_bar_height - 2.0).max(0.0);
+        let overlap_stride = icon_size * 0.65;
+        single + (icon_count as f32 - 1.0) * overlap_stride
+    }
 }
 
 fn harness_icon_gap(metrics: &RenderMetrics) -> f32 {
