@@ -1770,6 +1770,7 @@ impl Mux {
             let pane_id = pos.pane.pane_id();
             if self.get_agent_metadata_for_pane(pane_id).is_some()
                 || self.detected_agent_panes.read().contains(&pane_id)
+                || self.mirrored_agent_harness_by_pane.read().contains_key(&pane_id)
             {
                 return true;
             }
@@ -1817,16 +1818,12 @@ impl Mux {
         for pos in tab.iter_panes_ignoring_zoom() {
             let pane_id = pos.pane.pane_id();
 
+            // cached_agent_harness_for_pane checks mirrored (remote), runtime,
+            // and metadata sources — a known harness means it's an agent pane.
             let Some(harness) = self.cached_agent_harness_for_pane(pane_id) else {
                 continue;
             };
             if matches!(harness, AgentHarness::Unknown) {
-                continue;
-            }
-
-            let is_agent = self.get_agent_metadata_for_pane(pane_id).is_some()
-                || detected_agent_panes.contains(&pane_id);
-            if !is_agent {
                 continue;
             }
 
