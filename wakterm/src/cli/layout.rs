@@ -531,6 +531,8 @@ mod test {
             name: name.to_string(),
             launch_cmd: "codex".to_string(),
             declared_cwd: format!("/tmp/{name}"),
+            adopted_pid: None,
+            adopted_start_time: None,
             created_at: Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap(),
             repo_root: None,
             worktree: None,
