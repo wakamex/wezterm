@@ -20,6 +20,7 @@ use smol::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use smol::prelude::*;
 use smol::{block_on, Async};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io::{Read, Write};
 use std::marker::Unpin;
 use std::net::TcpStream;
@@ -35,9 +36,73 @@ use std::time::Duration;
 use thiserror::Error;
 use wakterm_uds::UnixStream;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionProbeStep {
+    GetCodecVersion,
+    SetClientId,
+}
+
+impl std::fmt::Display for VersionProbeStep {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.write_str(match self {
+            Self::GetCodecVersion => "GetCodecVersion",
+            Self::SetClientId => "SetClientId",
+        })
+    }
+}
+
+impl VersionProbeStep {
+    fn progress_message(self) -> Option<&'static str> {
+        match self {
+            Self::GetCodecVersion => None,
+            Self::SetClientId => Some("Server version OK. Registering client...\n"),
+        }
+    }
+
+    fn timeout_message(self) -> &'static str {
+        match self {
+            Self::GetCodecVersion => {
+                "Timed out while waiting for the server version response. \
+                 This may be due to network connectivity issues."
+            }
+            Self::SetClientId => {
+                "Timed out while waiting for the server to acknowledge client registration \
+                 after the version check succeeded. This usually means the SSH/proxy \
+                 connection stalled after the server version reply."
+            }
+        }
+    }
+
+    fn decode_mismatch_context(self) -> &'static str {
+        match self {
+            Self::GetCodecVersion => {
+                "While asking the server for its version, the protocol reply could not be decoded"
+            }
+            Self::SetClientId => {
+                "While registering the client with the server, the protocol reply could not be decoded"
+            }
+        }
+    }
+
+    fn generic_error_context(self) -> &'static str {
+        match self {
+            Self::GetCodecVersion => "while being asked for its version",
+            Self::SetClientId => "while acknowledging client registration",
+        }
+    }
+}
+
 #[derive(Error, Debug)]
-#[error("Timeout")]
-struct Timeout;
+#[error("Timeout while waiting for {step}")]
+struct VersionProbeTimeout {
+    step: VersionProbeStep,
+}
+
+#[derive(Error, Debug)]
+#[error("Version probe step: {step}")]
+struct VersionProbeStepMarker {
+    step: VersionProbeStep,
+}
 
 #[derive(Error, Debug)]
 #[error("ChannelSendError")]
@@ -94,11 +159,30 @@ fn is_likely_version_probe_decode_mismatch(err: &anyhow::Error) -> bool {
     })
 }
 
+fn version_probe_step_from_error(err: &anyhow::Error) -> Option<VersionProbeStep> {
+    err.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<VersionProbeTimeout>()
+            .map(|timeout| timeout.step)
+            .or_else(|| {
+                cause
+                    .downcast_ref::<VersionProbeStepMarker>()
+                    .map(|marker| marker.step)
+            })
+            .or_else(|| match cause.to_string().as_str() {
+                "Version probe step: GetCodecVersion" => Some(VersionProbeStep::GetCodecVersion),
+                "Version probe step: SetClientId" => Some(VersionProbeStep::SetClientId),
+                _ => None,
+            })
+    })
+}
+
 fn format_version_probe_error(err: &anyhow::Error) -> String {
-    if err.root_cause().is::<Timeout>() {
-        "Timed out while parsing the response from the server. \
-        This may be due to network connectivity issues"
-            .to_string()
+    if let Some(timeout) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<VersionProbeTimeout>())
+    {
+        timeout.step.timeout_message().to_string()
     } else if err.root_cause().is::<CorruptResponse>() {
         "Received an implausible and likely corrupt response from \
         the server. This can happen if the remote host outputs \
@@ -115,21 +199,25 @@ fn format_version_probe_error(err: &anyhow::Error) -> String {
         format!(
             "Please install the same version of wakterm on both the client and server!\n\
              This client is {} (codec version {}).\n\
-             While asking the server for its version, the first protocol reply \
-             could not be decoded: {err:#}\n\
+             {}: {err:#}\n\
              This usually means that an older or otherwise mismatched mux server \
              is still running. Restart or redeploy the mux server and try again.\n\
              It can also happen if the remote host outputs to stdout prior to \
              running commands; check your shell startup.",
             config::wakterm_version(),
             CODEC_VERSION,
+            version_probe_step_from_error(err)
+                .unwrap_or(VersionProbeStep::GetCodecVersion)
+                .decode_mismatch_context(),
         )
     } else {
+        let context = version_probe_step_from_error(err)
+            .map(VersionProbeStep::generic_error_context)
+            .unwrap_or("while being asked for its version");
         format!(
             "Please install the same version of wakterm on both \
-             the client and server! \
-             The server reported error '{err}' while being asked for its \
-             version.  This likely means that the server is older \
+             the client and server! The server reported error '{err}' \
+             {context}. This likely means that the server is older \
              than the client, but it could also happen if the remote \
              host outputs to stdout prior to running commands. \
              Check your shell startup!",
@@ -1218,6 +1306,27 @@ impl Reconnectable {
 }
 
 impl Client {
+    async fn await_version_probe_step<T, F>(
+        &self,
+        step: VersionProbeStep,
+        ui: &ConnectionUI,
+        fut: F,
+    ) -> anyhow::Result<T>
+    where
+        F: Future<Output = anyhow::Result<T>>,
+    {
+        if let Some(message) = step.progress_message() {
+            ui.output_str(message);
+        }
+
+        fut.or(async move {
+            smol::Timer::after(Duration::from_secs(60)).await;
+            Err(VersionProbeTimeout { step }.into())
+        })
+        .await
+        .context(VersionProbeStepMarker { step })
+    }
+
     fn new(local_domain_id: Option<DomainId>, mut reconnectable: Reconnectable) -> Self {
         log::debug!(
             "Client::new starting for domain {:?} config={}",
@@ -1349,11 +1458,11 @@ impl Client {
             self.view_id
         );
         match self
-            .get_codec_version(GetCodecVersion {})
-            .or(async {
-                smol::Timer::after(Duration::from_secs(60)).await;
-                Err(Timeout).context("Timeout")
-            })
+            .await_version_probe_step(
+                VersionProbeStep::GetCodecVersion,
+                ui,
+                self.get_codec_version(GetCodecVersion {}),
+            )
             .await
         {
             Ok(info) if info.codec_vers == CODEC_VERSION => {
@@ -1367,12 +1476,16 @@ impl Client {
                     info.version_string,
                     info.codec_vers
                 );
-                self.set_client_id(SetClientId {
-                    client_id: self.client_id.clone(),
-                    view_id: self.view_id.clone(),
-                    is_proxy: false,
-                    client_version_string: Some(config::wakterm_version().to_owned()),
-                })
+                self.await_version_probe_step(
+                    VersionProbeStep::SetClientId,
+                    ui,
+                    self.set_client_id(SetClientId {
+                        client_id: self.client_id.clone(),
+                        view_id: self.view_id.clone(),
+                        is_proxy: false,
+                        client_version_string: Some(config::wakterm_version().to_owned()),
+                    }),
+                )
                 .await?;
                 Ok(info)
             }
@@ -1654,10 +1767,44 @@ mod tests {
 
     #[test]
     fn version_probe_message_mentions_stale_mux_server() {
-        let err = anyhow!("Error while decoding response pdu: Invalid Bool Encoding");
+        let err = Err::<(), _>(anyhow!(
+            "Error while decoding response pdu: Invalid Bool Encoding"
+        ))
+        .context(VersionProbeStepMarker {
+            step: VersionProbeStep::GetCodecVersion,
+        })
+        .unwrap_err();
         let msg = format_version_probe_error(&err);
         assert!(msg.contains("could not be decoded"));
         assert!(msg.contains("mismatched mux server"));
         assert!(msg.contains("Restart or redeploy the mux server"));
+    }
+
+    #[test]
+    fn version_probe_timeout_mentions_client_registration_step() {
+        let err = Err::<(), _>(VersionProbeTimeout {
+            step: VersionProbeStep::SetClientId,
+        })
+        .context(VersionProbeStepMarker {
+            step: VersionProbeStep::SetClientId,
+        })
+        .unwrap_err();
+        let msg = format_version_probe_error(&err);
+        assert!(msg.contains("acknowledge client registration"));
+        assert!(msg.contains("SSH/proxy connection stalled"));
+    }
+
+    #[test]
+    fn version_probe_decode_mismatch_mentions_registration_step() {
+        let err = Err::<(), _>(anyhow!(
+            "Error while decoding response pdu: InvalidTagEncoding"
+        ))
+        .context(VersionProbeStepMarker {
+            step: VersionProbeStep::SetClientId,
+        })
+        .unwrap_err();
+        let msg = format_version_probe_error(&err);
+        assert!(msg.contains("registering the client with the server"));
+        assert!(!msg.contains("first protocol reply"));
     }
 }
