@@ -55,7 +55,7 @@ impl VersionProbeStep {
     fn progress_message(self) -> Option<&'static str> {
         match self {
             Self::GetCodecVersion => None,
-            Self::SetClientId => Some("Server version OK. Registering client...\n"),
+            Self::SetClientId => None,
         }
     }
 
@@ -1476,6 +1476,14 @@ impl Client {
                     info.version_string,
                     info.codec_vers
                 );
+                ui.output_str(&format!(
+                    "Server version OK: server {} (codec {}), client {} (codec {}). \
+                     Registering client...\n",
+                    info.version_string,
+                    info.codec_vers,
+                    config::wakterm_version(),
+                    CODEC_VERSION,
+                ));
                 self.await_version_probe_step(
                     VersionProbeStep::SetClientId,
                     ui,
