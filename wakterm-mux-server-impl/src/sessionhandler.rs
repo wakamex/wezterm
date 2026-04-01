@@ -373,10 +373,31 @@ impl SessionHandler {
                     let view_id = Arc::new(view_id);
                     self.client_id.replace(client_id.clone());
                     let send_response = send_response.clone();
+                    log::info!(
+                        "SetClientId scheduling register_client for {} (pid {}, view {:?})",
+                        client_id.hostname,
+                        client_id.pid,
+                        view_id.as_ref(),
+                    );
                     spawn_into_main_thread(async move {
+                        log::info!(
+                            "SetClientId main-thread start for {} (pid {}, view {:?})",
+                            client_id.hostname,
+                            client_id.pid,
+                            view_id.as_ref(),
+                        );
                         let mux = Mux::get();
+                        log::info!(
+                            "SetClientId before register_client for {} (pid {}, view {:?})",
+                            client_id.hostname,
+                            client_id.pid,
+                            view_id.as_ref(),
+                        );
                         mux.register_client(client_id, view_id);
+                        log::info!("SetClientId after register_client");
+                        log::info!("SetClientId sending UnitResponse");
                         send_response(Ok(Pdu::UnitResponse(UnitResponse {})));
+                        log::info!("SetClientId sent UnitResponse");
                     })
                     .detach();
                     return;
