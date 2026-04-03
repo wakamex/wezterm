@@ -586,21 +586,13 @@ impl ConfigInner {
         self.warnings = warnings;
 
         // Before we process the success/failure, extract and update
-        // any paths that we should be watching
+        // any paths that we should be watching.
+        // We canonicalize to resolve symlinks so that edits to the
+        // target file trigger a reload. If the symlink itself is
+        // re-pointed, use CTRL+SHIFT+R to reload manually.
         let mut watch_paths = vec![];
         if let Some(path) = file_name {
-            // Let's also watch the parent directory for folks that do
-            // things with symlinks:
-            if let Some(parent) = path.parent() {
-                // But avoid watching the home dir itself, so that we
-                // don't keep reloading every time something in the
-                // home dir changes!
-                // <https://github.com/wakamex/wakterm/issues/1895>
-                if parent != &*HOME_DIR {
-                    watch_paths.push(parent.to_path_buf());
-                }
-            }
-            watch_paths.push(path);
+            watch_paths.push(std::fs::canonicalize(&path).unwrap_or(path));
         }
         if let Some(lua) = &lua {
             ConfigInner::accumulate_watch_paths(lua, &mut watch_paths);

@@ -83,6 +83,11 @@ configuration will be automatically reloaded and the majority of options will
 take effect immediately.  You may also use the `CTRL+SHIFT+R` keyboard shortcut
 to force the configuration to be reloaded.
 
+!!! note
+    If your config file is a symlink, wakterm resolves it and watches the
+    target file, so edits to the target are picked up automatically.  If you
+    re-point the symlink to a different file, press `CTRL+SHIFT+R` to reload.
+
 !!! info
     **The configuration file may be evaluated multiple times for each wakterm
     process** both at startup and in response to the configuration file being
