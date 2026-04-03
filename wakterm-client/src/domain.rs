@@ -803,6 +803,12 @@ impl ClientDomain {
                     pane
                 });
                 for (pane_id, metadata) in pending_agent_metadata {
+                    log::info!(
+                        "process_pane_list mirroring pane_id={} metadata_present={} launch_cmd={:?}",
+                        pane_id,
+                        metadata.is_some(),
+                        metadata.as_ref().map(|m| m.launch_cmd.as_str())
+                    );
                     mux.set_mirrored_agent_harness(pane_id, metadata.as_ref());
                 }
 

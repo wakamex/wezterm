@@ -1770,7 +1770,10 @@ impl Mux {
             let pane_id = pos.pane.pane_id();
             if self.get_agent_metadata_for_pane(pane_id).is_some()
                 || self.detected_agent_panes.read().contains(&pane_id)
-                || self.mirrored_agent_harness_by_pane.read().contains_key(&pane_id)
+                || self
+                    .mirrored_agent_harness_by_pane
+                    .read()
+                    .contains_key(&pane_id)
             {
                 return true;
             }
@@ -1829,18 +1832,16 @@ impl Mux {
 
             let visible = match badge_mode {
                 AgentTabBadgeMode::Identity => true,
-                AgentTabBadgeMode::Turn => {
+                AgentTabBadgeMode::Turn => runtime_by_pane
+                    .get(&pane_id)
+                    .map_or(false, |rt| Self::agent_waiting_on_user(rt)),
+                AgentTabBadgeMode::Attention => {
                     runtime_by_pane
                         .get(&pane_id)
-                        .map_or(false, |rt| Self::agent_waiting_on_user(rt))
-                }
-                AgentTabBadgeMode::Attention => {
-                    runtime_by_pane.get(&pane_id).map_or(false, |rt| {
-                        match view_id {
+                        .map_or(false, |rt| match view_id {
                             Some(vid) => self.agent_turn_needs_attention_for_view(vid, pane_id, rt),
                             None => Self::agent_waiting_on_user(rt),
-                        }
-                    })
+                        })
                 }
                 AgentTabBadgeMode::Off => false,
             };
@@ -1852,6 +1853,14 @@ impl Mux {
                 }
             }
         }
+
+        log::info!(
+            "visible_harness_icons_for_tab tab_id={} view_id={:?} badge_mode={:?} icons={:?}",
+            tab_id,
+            view_id.map(|v| &v.0),
+            badge_mode,
+            icons
+        );
 
         icons
     }
@@ -5827,7 +5836,9 @@ mod test {
         let _config = TestConfigGuard::new("turn", "🤖 ");
         assert_eq!(mux.effective_tab_title(tab.tab_id()), "🤖 scrape");
         // No harness icon available
-        assert!(mux.visible_harness_icons_for_tab(tab.tab_id(), None).is_empty());
+        assert!(mux
+            .visible_harness_icons_for_tab(tab.tab_id(), None)
+            .is_empty());
 
         // With empty badge text → no badge at all
         let _config2 = TestConfigGuard::new("turn", "");
@@ -5899,11 +5910,13 @@ mod test {
         );
         // Both views see the icon (attention mode, neither has acknowledged)
         assert_eq!(
-            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_a.as_ref())).len(),
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_a.as_ref()))
+                .len(),
             1
         );
         assert_eq!(
-            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_b.as_ref())).len(),
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_b.as_ref()))
+                .len(),
             1
         );
 
@@ -5913,11 +5926,13 @@ mod test {
 
         // View A acknowledged → no icon for A, still shows for B
         assert_eq!(
-            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_a.as_ref())).len(),
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_a.as_ref()))
+                .len(),
             0
         );
         assert_eq!(
-            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_b.as_ref())).len(),
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_b.as_ref()))
+                .len(),
             1
         );
     }
@@ -5972,7 +5987,8 @@ mod test {
             "scrape"
         );
         assert_eq!(
-            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_id.as_ref())).len(),
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_id.as_ref()))
+                .len(),
             1
         );
 
@@ -5981,7 +5997,8 @@ mod test {
 
         // After focusing, attention is acknowledged → icon hidden
         assert_eq!(
-            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_id.as_ref())).len(),
+            mux.visible_harness_icons_for_tab(tab.tab_id(), Some(view_id.as_ref()))
+                .len(),
             0
         );
     }

@@ -291,7 +291,10 @@ impl UserData for TabInformation {
             }
         });
         fields.add_field_method_get("harness_icon", |_, this| {
-            Ok(this.harness_icons.first().map(|icon| icon.as_str().to_string()))
+            Ok(this
+                .harness_icons
+                .first()
+                .map(|icon| icon.as_str().to_string()))
         });
         fields.add_field_method_get("harness_icons", |_, this| {
             Ok(this
@@ -3720,6 +3723,17 @@ impl TermWindow {
                 }
             })
             .collect();
+
+        for tab in &tabs {
+            log::info!(
+                "get_tab_information tab_id={} title={:?} active={} harness_icons={:?} active_pane_id={:?}",
+                tab.tab_id,
+                tab.tab_title,
+                tab.is_active,
+                tab.harness_icons,
+                tab.active_pane.as_ref().map(|p| p.pane_id)
+            );
+        }
 
         assign_tab_colors(&self.config, &mut tabs);
         tabs
