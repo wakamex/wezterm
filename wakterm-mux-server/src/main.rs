@@ -258,6 +258,7 @@ fn run() -> anyhow::Result<()> {
         if let Err(err) = mux::session_persistence::save_session() {
             log::debug!("auto-save session: {:#}", err);
         }
+        mux::memory_report::log_memory_report();
     });
 
     let activity = Activity::new();

@@ -48,6 +48,7 @@ pub mod client;
 pub mod connui;
 pub mod domain;
 pub mod localpane;
+pub mod memory_report;
 pub mod pane;
 pub mod renderable;
 pub mod session_persistence;
@@ -109,6 +110,13 @@ pub enum MuxNotification {
 }
 
 static SUB_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// Per-pane action buffer byte sizes, updated by parse_buffered_data reader threads.
+/// Tracks cumulative bytes parsed since last flush — grows unbounded when
+/// SynchronizedOutput is held open.
+/// Used by memory_report to detect unbounded growth.
+static ACTION_BUFFER_SIZES: std::sync::LazyLock<RwLock<HashMap<PaneId, Arc<AtomicUsize>>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
 pub struct Mux {
     tabs: RwLock<HashMap<TabId, Arc<Tab>>>,
@@ -238,6 +246,13 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
     let mut delay = Duration::from_millis(configuration().mux_output_parser_coalesce_delay_ms);
     let mut deadline = None;
 
+    // Register an atomic counter so the memory report can observe our action buffer size.
+    let pane_id = pane.upgrade().map(|p| p.pane_id());
+    let action_buf_gauge = Arc::new(AtomicUsize::new(0));
+    if let Some(id) = pane_id {
+        ACTION_BUFFER_SIZES.write().insert(id, Arc::clone(&action_buf_gauge));
+    }
+
     loop {
         match rx.read(&mut buf) {
             Ok(size) if size == 0 => {
@@ -283,6 +298,23 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
                     }
                 });
                 action_size += size;
+                action_buf_gauge.store(action_size, Ordering::Relaxed);
+
+                // Safety valve: if SynchronizedOutput is held open and the
+                // buffer has grown past 4MB, flush anyway to prevent OOM.
+                // This may cause a partial frame to render, but that's better
+                // than unbounded memory growth from a stuck or crashed app.
+                const SYNC_OUTPUT_MAX_BYTES: usize = 4 * 1024 * 1024;
+                if hold && action_size > SYNC_OUTPUT_MAX_BYTES {
+                    log::warn!(
+                        "SynchronizedOutput held with {}MB buffered, forcing flush",
+                        action_size / (1024 * 1024)
+                    );
+                    send_actions_to_mux(&pane, &dead, std::mem::take(&mut actions));
+                    action_size = 0;
+                    action_buf_gauge.store(0, Ordering::Relaxed);
+                }
+
                 if !actions.is_empty() && !hold {
                     // If we haven't accumulated too much data,
                     // pause for a short while to increase the chances
@@ -331,6 +363,11 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
     // display what they displayed.
     if !actions.is_empty() {
         send_actions_to_mux(&pane, &dead, std::mem::take(&mut actions));
+    }
+
+    // Clean up gauge
+    if let Some(id) = pane_id {
+        ACTION_BUFFER_SIZES.write().remove(&id);
     }
 }
 
@@ -1408,6 +1445,9 @@ impl Mux {
 
     pub fn record_agent_output(&self, pane_id: PaneId) {
         if self.get_agent_metadata_for_pane(pane_id).is_none() {
+            if self.mirrored_agent_harness_by_pane.read().contains_key(&pane_id) {
+                return;
+            }
             let before_detected = self.detected_agent_panes.read().contains(&pane_id);
             let detected = self.detect_agent_state_for_pane(pane_id);
             if Self::agent_auto_adopt_on_confirmed_session_match() {
@@ -4927,6 +4967,61 @@ mod test {
     }
 
     #[test]
+    fn record_agent_output_preserves_mirrored_harness_for_remote_pane() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let domain = Arc::new(FakeDomain::new());
+        let mux = Arc::new(Mux::new(Some(Arc::clone(&domain) as Arc<dyn Domain>)));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+
+        let window_id = *mux.new_empty_window(Some(DEFAULT_WORKSPACE.to_string()), None);
+        let tab = Arc::new(Tab::new(&size));
+        let pane = FakePane::new(148, size, domain.id);
+        let pane_id = pane.pane_id();
+        tab.assign_pane(&pane);
+        mux.add_tab_and_active_pane(&tab).unwrap();
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+
+        let metadata = AgentMetadata {
+            agent_id: "remote-claude".to_string(),
+            name: "remote_claude".to_string(),
+            launch_cmd:
+                "claude --dangerously-skip-permissions --add-dir /home/mihai --add-dir /code"
+                    .to_string(),
+            declared_cwd: "/code/application".to_string(),
+            adopted_pid: None,
+            adopted_start_time: None,
+            created_at: Utc.with_ymd_and_hms(2026, 4, 3, 16, 27, 0).unwrap(),
+            repo_root: None,
+            worktree: None,
+            branch: None,
+            managed_checkout: false,
+        };
+        mux.set_mirrored_agent_harness(pane_id, Some(&metadata));
+
+        assert!(matches!(
+            mux.cached_agent_harness_for_pane(pane_id),
+            Some(crate::agent::AgentHarness::Claude)
+        ));
+
+        mux.record_agent_output(pane_id);
+
+        assert!(matches!(
+            mux.cached_agent_harness_for_pane(pane_id),
+            Some(crate::agent::AgentHarness::Claude)
+        ));
+    }
+
+    #[test]
     fn restore_agent_metadata_queues_initial_harness_refresh() {
         let _test_lock = TEST_MUX_LOCK.lock();
         let executor = promise::spawn::SimpleExecutor::new();
@@ -6530,5 +6625,169 @@ mod test {
 
         assert!(!mux.should_skip_queued_notification(&MuxNotification::PaneOutput(1)));
         assert!(mux.should_skip_queued_notification(&MuxNotification::PaneOutput(1)));
+    }
+
+    /// Helper: spawn parse_buffered_data on a FakePane, return the write end
+    /// and the pane_id so the caller can feed data and observe ACTION_BUFFER_SIZES.
+    fn spawn_parser_thread(pane_id: PaneId) -> (FileDescriptor, Arc<dyn Pane>) {
+        let size = TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 480,
+            dpi: 96,
+        };
+        let pane = FakePane::new(pane_id, size, 0);
+        let weak = Arc::downgrade(&pane);
+        let (tx, rx) = filedescriptor::socketpair().expect("socketpair");
+        let dead = Arc::new(AtomicBool::new(false));
+
+        std::thread::spawn(move || {
+            parse_buffered_data(weak, &dead, rx);
+        });
+
+        (tx, pane)
+    }
+
+    #[test]
+    fn synchronized_output_accumulates_unbounded_actions() {
+        // Reproduce: send CSI?2026h (enable SynchronizedOutput) then stream
+        // output without ever sending CSI?2026l (disable). The action buffer
+        // should grow without bound — this is the suspected OOM cause.
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let pane_id: PaneId = 9900;
+        let (mut tx, _pane) = spawn_parser_thread(pane_id);
+
+        // Enable SynchronizedOutput
+        tx.write_all(b"\x1b[?2026h").unwrap();
+        // Give the parser thread a moment to process
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Verify the parser thread registered
+        let registered = ACTION_BUFFER_SIZES.read().contains_key(&pane_id);
+        assert!(registered, "parser thread did not register pane {} in ACTION_BUFFER_SIZES", pane_id);
+
+        // Stream output while in synchronized mode — 100 rounds of 10KB each
+        for _ in 0..100 {
+            let data = vec![b'A'; 10_000];
+            tx.write_all(&data).unwrap();
+        }
+        // Let the parser thread consume everything
+        std::thread::sleep(Duration::from_millis(200));
+
+        let buf_bytes = ACTION_BUFFER_SIZES
+            .read()
+            .get(&pane_id)
+            .map(|a| a.load(Ordering::Relaxed))
+            .unwrap_or(0);
+
+        // We sent 1MB of data while SynchronizedOutput was held open.
+        // The action_size counter tracks raw bytes parsed since last flush,
+        // so it should reflect most of the 1MB.
+        assert!(
+            buf_bytes > 500_000,
+            "expected >500KB buffered during SynchronizedOutput hold, got {} bytes", buf_bytes
+        );
+
+        // Now disable synchronized output and let it flush
+        tx.write_all(b"\x1b[?2026l").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let buf_bytes_after = ACTION_BUFFER_SIZES
+            .read()
+            .get(&pane_id)
+            .map(|a| a.load(Ordering::Relaxed))
+            .unwrap_or(0);
+
+        assert!(
+            buf_bytes_after < 1_000,
+            "expected buffer flushed after SynchronizedOutput reset, got {} bytes", buf_bytes_after
+        );
+
+        // Clean up
+        drop(tx);
+    }
+
+    #[test]
+    fn synchronized_output_capped_at_4mb() {
+        // Verify the safety valve: even with SynchronizedOutput held open,
+        // the buffer is force-flushed at 4MB to prevent OOM.
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let pane_id: PaneId = 9902;
+        let (mut tx, _pane) = spawn_parser_thread(pane_id);
+
+        // Enable SynchronizedOutput
+        tx.write_all(b"\x1b[?2026h").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Stream 8MB of data — well over the 4MB cap
+        for _ in 0..80 {
+            let data = vec![b'C'; 100_000];
+            tx.write_all(&data).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(500));
+
+        let buf_bytes = ACTION_BUFFER_SIZES
+            .read()
+            .get(&pane_id)
+            .map(|a| a.load(Ordering::Relaxed))
+            .unwrap_or(0);
+
+        // The buffer should have been force-flushed and be well under 8MB.
+        // It could be up to 4MB + one read chunk, but not the full 8MB.
+        assert!(
+            buf_bytes < 5 * 1024 * 1024,
+            "expected buffer capped under 5MB, got {} bytes", buf_bytes
+        );
+
+        drop(tx);
+    }
+
+    #[test]
+    fn normal_output_flushes_actions_promptly() {
+        // Control test: without SynchronizedOutput, actions should be flushed
+        // after each read cycle, so the buffer never grows large.
+        let _test_lock = TEST_MUX_LOCK.lock();
+        let _executor = promise::spawn::SimpleExecutor::new();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = TestMuxGuard;
+
+        let pane_id = 9901;
+        let (mut tx, _pane) = spawn_parser_thread(pane_id);
+
+        // Stream 1MB of output in normal mode
+        for _ in 0..100 {
+            let data = vec![b'B'; 10_000];
+            tx.write_all(&data).unwrap();
+            // Small delay so the parser can flush between writes
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+
+        let buf_bytes = ACTION_BUFFER_SIZES
+            .read()
+            .get(&pane_id)
+            .map(|a| a.load(Ordering::Relaxed))
+            .unwrap_or(0);
+
+        // In normal mode, action_size resets to 0 after each flush,
+        // so the buffer should be small (whatever's in-flight from the last read)
+        assert!(
+            buf_bytes < 100_000,
+            "expected small action buffer in normal mode, got {} bytes", buf_bytes
+        );
+
+        drop(tx);
     }
 }

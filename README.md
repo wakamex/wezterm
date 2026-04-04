@@ -10,6 +10,8 @@ See [CHANGELOG-FORK.md](CHANGELOG-FORK.md) for the detailed fork fix history.
 - Auto-saves tab layout, split tree structure, working directories, and titles every 60s and on SIGTERM
 - Auto-restores on startup with correct nested splits, proportional sizing, and active-tab selection
 - `wakterm cli save-layout` / `wakterm cli restore-layout` for exact Rust-backed manual snapshots, replay, and active-tab restore
+- Mux server memory monitoring: logs RSS and per-pane buffer sizes every 60s (at `WAKTERM_LOG=info`)
+- Fixed upstream OOM where stuck SynchronizedOutput caused unbounded memory growth ([details](docs/mux-server-memory.md))
 
 **Agent harnesses**
 - Claude, Codex, Gemini, and OpenCode are first-class citizens

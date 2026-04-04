@@ -146,6 +146,9 @@ All changes relative to upstream `wakterm/wakterm` main at `05343b387`.
 
 ### Mux Protocol / Server
 
+- **Fix OOM from unbounded SynchronizedOutput buffer**
+  When a TUI app enables SynchronizedOutput (`CSI?2026h`) and crashes or gets stuck without disabling it, the mux server accumulated parsed actions without bound. Over days, this grew to 25GB+ and triggered the OOM killer. Added a 4MB safety valve that force-flushes the buffer during hold. Also added 60-second memory reporting (RSS + per-pane action buffer sizes) at INFO log level.
+
 - **Reject oversized PDUs before allocation** ([e1e8510](https://github.com/wakamex/wakterm/commit/e1e8510b3))
   Both `decode_raw` and `decode_raw_async` allocated buffers from untrusted wire data without bounds. Added `MAX_PDU_SIZE` (64 MiB) check.
   Fixes #7527
