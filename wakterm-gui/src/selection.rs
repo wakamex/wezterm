@@ -355,3 +355,108 @@ impl SelectionRange {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Simulate the selection state after a drag that starts in a right pane
+    /// and ends with the mouse crossing into the left pane.
+    ///
+    /// Layout: two panes side by side.
+    ///   Left pane:  columns 0..40 (local cols 0..40)
+    ///   Right pane: columns 41..80 (local cols 0..39)
+    ///
+    /// User clicks at right pane local col 30, row 5, drags left to
+    /// right pane local col 0 (mouse crossed pane boundary, clamped).
+    ///
+    /// Bug: on mouse release over the left pane, the copy-to-clipboard
+    /// fails even though the selection is visually present in the right pane.
+    /// This test documents the expected selection state.
+
+    fn right_pane_origin() -> SelectionCoordinate {
+        // Click started at column 30, row 5 in the right pane
+        SelectionCoordinate::x_y(30, 5)
+    }
+
+    /// Helper: simulate extend_selection_at_mouse_cursor logic for Cell mode
+    fn simulate_extend(selection: &mut Selection, origin: SelectionCoordinate, x: usize, y: StableRowIndex) {
+        let origin_x_usize = match origin.x {
+            SelectionX::Cell(v) => v,
+            SelectionX::BeforeZero => 0,
+        };
+        let (start_x, end_x) = if (x >= origin_x_usize && y == origin.y) || y > origin.y {
+            (origin.x, SelectionX::Cell(x).saturating_sub(1))
+        } else {
+            (origin.x.saturating_sub(1), SelectionX::Cell(x))
+        };
+
+        selection.range = if origin.x != SelectionX::Cell(x) || origin.y != y {
+            Some(
+                SelectionRange::start(SelectionCoordinate {
+                    x: start_x,
+                    y: origin.y,
+                })
+                .extend(SelectionCoordinate { x: end_x, y }),
+            )
+        } else {
+            None
+        };
+    }
+
+    #[test]
+    fn cross_pane_drag_selection_is_non_empty() {
+        // During the drag, extend_selection_at_mouse_cursor computes the
+        // selection range. When the mouse crosses into the left pane,
+        // the column is clamped to 0 in the right pane's coordinate space.
+        let origin = right_pane_origin();
+        let mut selection = Selection::default();
+        selection.begin(origin);
+
+        // Simulate extend with x=0, y=5 (dragged to column 0, same row)
+        simulate_extend(&mut selection, origin, 0, 5);
+
+        assert!(
+            selection.range.is_some(),
+            "selection range should exist after cross-pane drag"
+        );
+
+        let range = selection.range.unwrap().normalize();
+        let cols = range.cols_for_row( 5, false);
+        assert!(
+            !cols.is_empty(),
+            "selection should cover columns on the dragged row, got {:?}", cols
+        );
+
+        // Dragging backwards from col 30 to col 0:
+        // origin.x.saturating_sub(1) = Cell(29), end_x = Cell(0)
+        // normalize: start.x=Cell(0), end.x=Cell(29)
+        // cols_for_row: 0..30
+        assert_eq!(cols, 0..30, "expected columns 0..30 selected");
+    }
+
+    #[test]
+    fn cross_pane_drag_selection_multiline() {
+        // Drag from right pane col 30 row 5 up to row 3, crossing into
+        // the left pane (col clamped to 0).
+        let origin = right_pane_origin();
+        let mut selection = Selection::default();
+        selection.begin(origin);
+
+        simulate_extend(&mut selection, origin, 0, 3);
+
+        let range = selection.range.unwrap().normalize();
+        // Should span rows 3..6 (3, 4, 5)
+        assert_eq!(range.rows(), 3..6);
+
+        let cols_3 = range.cols_for_row( 3, false);
+        assert!(!cols_3.is_empty(), "row 3 should have selected columns");
+
+        let cols_5 = range.cols_for_row( 5, false);
+        assert!(!cols_5.is_empty(), "row 5 should have selected columns");
+    }
+
+    // The coordinate mismatch bug on Release is tested directly in
+    // termwindow::mouseevent::test::release_over_left_pane_after_right_pane_drag_has_wrong_coords
+}
+

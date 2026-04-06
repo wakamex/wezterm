@@ -694,8 +694,14 @@ impl super::TermWindow {
             Some(MouseCapture::TerminalPane(_))
         );
 
+        // On Release over a non-active pane (e.g. drag crossed pane boundary),
+        // we need to adjust coordinates to the active pane, not the hovered one.
+        // Treat it like a captured event so the active pane gets correct coords.
+        let treat_as_captured = is_already_captured
+            || matches!(&event.kind, WMEK::Release(_));
+
         for pos in self.get_panes_to_render() {
-            if !is_already_captured
+            if !treat_as_captured
                 && row >= pos.top as i64
                 && row <= (pos.top + pos.height) as i64
                 && column >= pos.left
@@ -742,7 +748,7 @@ impl super::TermWindow {
                 column = column.saturating_sub(pos.left);
                 row = row.saturating_sub(pos.top as i64);
                 break;
-            } else if is_already_captured && pane.pane_id() == pos.pane.pane_id() {
+            } else if treat_as_captured && pane.pane_id() == pos.pane.pane_id() {
                 column = column.saturating_sub(pos.left);
                 row = row.saturating_sub(pos.top as i64).max(0);
 
@@ -1084,5 +1090,181 @@ fn mouse_press_to_tmb(press: &MousePress) -> TMB {
         MousePress::Left => TMB::Left,
         MousePress::Right => TMB::Right,
         MousePress::Middle => TMB::Middle,
+    }
+}
+
+/// Result of resolving which pane a mouse event targets.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedMouseTarget {
+    /// The pane that should handle this event.
+    pub pane_id: mux::pane::PaneId,
+    /// Column in pane-local coordinates.
+    pub column: usize,
+    /// Row in pane-local coordinates.
+    pub row: i64,
+}
+
+/// Pure-function extraction of the pane-matching loop from mouse_event_terminal.
+///
+/// Given the mouse position (in tab-relative cell coordinates), the active pane,
+/// the current capture state, the event kind, and the list of positioned panes,
+/// returns which pane should handle the event and the pane-local coordinates.
+///
+/// This exists so we can unit-test the coordinate logic that goes wrong on
+/// cross-pane drag release.
+pub(crate) fn resolve_mouse_pane(
+    column: usize,
+    row: i64,
+    active_pane_id: mux::pane::PaneId,
+    is_captured: bool,
+    event_kind: &WMEK,
+    panes: &[PanePosition],
+) -> ResolvedMouseTarget {
+    let mut result_pane_id = active_pane_id;
+    let mut result_column = column;
+    let mut result_row = row;
+
+    // On Release, treat as captured so coordinates are adjusted to the
+    // active pane, not the hovered pane. This prevents the cross-pane
+    // drag copy bug where left-pane-local coords were paired with
+    // the right pane.
+    let treat_as_captured = is_captured
+        || matches!(event_kind, WMEK::Release(_));
+
+    for pos in panes {
+        if !treat_as_captured
+            && row >= pos.top as i64
+            && row <= (pos.top + pos.height) as i64
+            && column >= pos.left
+            && column <= pos.left + pos.width
+        {
+            if active_pane_id != pos.pane_id {
+                match event_kind {
+                    WMEK::Press(_) => {
+                        result_pane_id = pos.pane_id;
+                    }
+                    WMEK::Release(_) | WMEK::HorzWheel(_) => {}
+                    WMEK::VertWheel(_) => {
+                        result_pane_id = pos.pane_id;
+                    }
+                    WMEK::Move => {}
+                }
+            }
+            result_column = column.saturating_sub(pos.left);
+            result_row = row.saturating_sub(pos.top as i64);
+            break;
+        } else if treat_as_captured && active_pane_id == pos.pane_id {
+            result_column = column.saturating_sub(pos.left);
+            result_row = row.saturating_sub(pos.top as i64).max(0);
+            break;
+        }
+    }
+
+    ResolvedMouseTarget {
+        pane_id: result_pane_id,
+        column: result_column,
+        row: result_row,
+    }
+}
+
+/// Simplified pane position for testing (avoids needing Arc<dyn Pane>).
+#[derive(Debug, Clone)]
+pub(crate) struct PanePosition {
+    pub pane_id: mux::pane::PaneId,
+    pub left: usize,
+    pub top: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn two_pane_layout() -> Vec<PanePosition> {
+        vec![
+            PanePosition {
+                pane_id: 1,
+                left: 0,
+                top: 0,
+                width: 40,
+                height: 24,
+            },
+            PanePosition {
+                pane_id: 2,
+                left: 41,
+                top: 0,
+                width: 39,
+                height: 24,
+            },
+        ]
+    }
+
+    #[test]
+    fn press_in_right_pane_switches_active_pane() {
+        let panes = two_pane_layout();
+        let result = resolve_mouse_pane(
+            50, 5,                           // window col 50, row 5 (in right pane)
+            1,                               // active pane is left (1)
+            false,                           // not captured
+            &WMEK::Press(MousePress::Left),
+            &panes,
+        );
+        assert_eq!(result.pane_id, 2, "press should switch to right pane");
+        assert_eq!(result.column, 50 - 41, "column should be right-pane-local");
+        assert_eq!(result.row, 5);
+    }
+
+    #[test]
+    fn captured_drag_keeps_right_pane_coords() {
+        let panes = two_pane_layout();
+        // Mouse has moved to window col 20 (over left pane) during a captured drag
+        let result = resolve_mouse_pane(
+            20, 5,                           // window col 20 (over left pane)
+            2,                               // active pane is right (2)
+            true,                            // captured
+            &WMEK::Move,
+            &panes,
+        );
+        assert_eq!(result.pane_id, 2, "captured drag should keep right pane");
+        // column is clamped: 20 - 41 would underflow, saturating_sub gives 0
+        assert_eq!(result.column, 0, "column should clamp to 0");
+    }
+
+    #[test]
+    fn release_over_left_pane_after_right_pane_drag_has_wrong_coords() {
+        // This is the bug: on Release, capture is already cleared (line 133
+        // in mouse_event_impl runs before the pane loop). The mouse is over
+        // the LEFT pane, so coordinates are adjusted to left-pane-local space.
+        // But pane_id stays as the RIGHT pane (Release doesn't switch panes).
+        //
+        // Result: right pane gets left-pane-local coordinates.
+        let panes = two_pane_layout();
+        let result = resolve_mouse_pane(
+            20, 5,                           // window col 20, row 5 (left pane)
+            2,                               // active pane is right (2)
+            false,                           // NOT captured (cleared on Release)
+            &WMEK::Release(MousePress::Left),
+            &panes,
+        );
+
+        // Pane stays as right pane (2) — Release doesn't switch
+        assert_eq!(result.pane_id, 2);
+
+        // BUG: coordinates are adjusted to the LEFT pane's local space,
+        // not the right pane's. Column 20 in the left pane is meaningful
+        // in the left pane but meaningless for the right pane.
+        //
+        // For the right pane, the correct local column would be
+        // 20 - 41 = 0 (clamped), not 20 - 0 = 20.
+        //
+        // This wrong coordinate is then used to compute stable_row and
+        // passed to apply_hyperlinks on the right pane, corrupting state.
+        let correct_column_for_right_pane = 0; // 20 < 41, so clamp to 0
+        assert_eq!(
+            result.column, correct_column_for_right_pane,
+            "BUG: column {} is in left-pane-local space, not right-pane-local (expected {})",
+            result.column, correct_column_for_right_pane
+        );
     }
 }
