@@ -46,22 +46,37 @@ fn build_saved_session(mux: &Mux) -> SavedSession {
     let mut window_ids = mux.iter_windows();
     window_ids.sort();
 
-    for window_id in window_ids {
-        if let Some(window) = mux.get_window(window_id) {
+    // Collect workspace names and tab Arcs while holding the windows read
+    // lock, then release it before locking tab.inner. This avoids a
+    // lock-ordering deadlock: if a main-thread future holds tab.inner and
+    // tries windows.write(), it would block on our windows.read(), while
+    // we block on its tab.inner. (#7661 pattern)
+    let window_data: Vec<(String, Vec<_>)> = window_ids
+        .iter()
+        .filter_map(|&window_id| {
+            let window = mux.get_window(window_id)?;
             let workspace = window.get_workspace().to_string();
-            let mut tabs = Vec::new();
-            for tab in window.iter() {
-                let title = mux.raw_tab_title(tab.tab_id());
-                let mut tree = tab.codec_pane_tree_with_active_pane_id(None);
-                mux.annotate_pane_tree_with_agent_metadata(&mut tree);
-                // Fix any degenerate splits (< 3 cols/rows on one side)
-                // before saving, so the restore produces a usable layout
-                heal_tree(&mut tree);
-                tabs.push(SavedTab { title, tree });
-            }
-            if !tabs.is_empty() {
-                windows.push(SavedWindow { workspace, tabs });
-            }
+            let tabs: Vec<_> = window.iter().cloned().collect();
+            Some((workspace, tabs))
+        })
+        .collect();
+
+    for (workspace, tabs) in window_data {
+        let mut saved_tabs = Vec::new();
+        for tab in tabs {
+            let title = mux.raw_tab_title(tab.tab_id());
+            let mut tree = tab.codec_pane_tree_with_active_pane_id(None);
+            mux.annotate_pane_tree_with_agent_metadata(&mut tree);
+            // Fix any degenerate splits (< 3 cols/rows on one side)
+            // before saving, so the restore produces a usable layout
+            heal_tree(&mut tree);
+            saved_tabs.push(SavedTab { title, tree });
+        }
+        if !saved_tabs.is_empty() {
+            windows.push(SavedWindow {
+                workspace,
+                tabs: saved_tabs,
+            });
         }
     }
 
