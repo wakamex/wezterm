@@ -1923,6 +1923,58 @@ mod test {
     }
 
     #[test]
+    fn reconnect_reorders_tabs_to_match_remote_window_order() {
+        let _test_lock = TEST_MUX_LOCK.lock();
+        ensure_test_executor();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let _guard = MuxGuard;
+
+        let (_domain, inner, client_id, _view_id) = install_client_domain(&mux, "order-view");
+
+        let tab_a = leaf(1, 101, 1001, size(120, 40), false);
+        let tab_b = leaf(1, 102, 1002, size(120, 40), false);
+        let tab_c = leaf(1, 103, 1003, size(120, 40), false);
+
+        apply_panes(
+            &mux,
+            inner.clone(),
+            client_id.clone(),
+            panes_response_without_view_state(vec![tab_a.clone(), tab_b.clone(), tab_c.clone()]),
+        );
+
+        let local_window_id = inner.remote_to_local_window(1).unwrap();
+        let local_tab_a = inner.remote_to_local_tab_id(101).unwrap();
+        let local_tab_b = inner.remote_to_local_tab_id(102).unwrap();
+        let local_tab_c = inner.remote_to_local_tab_id(103).unwrap();
+
+        assert_eq!(
+            mux.get_window(local_window_id)
+                .unwrap()
+                .iter()
+                .map(|tab| tab.tab_id())
+                .collect::<Vec<_>>(),
+            vec![local_tab_a, local_tab_b, local_tab_c]
+        );
+
+        apply_panes(
+            &mux,
+            inner.clone(),
+            client_id.clone(),
+            panes_response_without_view_state(vec![tab_c, tab_a, tab_b]),
+        );
+
+        assert_eq!(
+            mux.get_window(local_window_id)
+                .unwrap()
+                .iter()
+                .map(|tab| tab.tab_id())
+                .collect::<Vec<_>>(),
+            vec![local_tab_c, local_tab_a, local_tab_b]
+        );
+    }
+
+    #[test]
     fn first_reconcile_ignores_non_matching_active_identity() {
         let _test_lock = TEST_MUX_LOCK.lock();
         ensure_test_executor();
